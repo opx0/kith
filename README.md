@@ -23,8 +23,27 @@ well-behaved clients honour, and the docs say so wherever it matters.
 
 ## Status
 
-**Spec-complete, pre-build.** The design is locked; the Rust implementation has not
-started. The paper trail:
+**v0.1 runs.** Every step of the [ROADMAP](ROADMAP.md#3-the-v01-walkthrough)'s
+twelve-step acceptance walkthrough has been executed across two Devices: Ana creates a
+Circle and adds a wallpaper, Ben joins with a printed Invite code, Ana approves him
+after matching the fingerprint both Devices print, and the wallpaper arrives in Ben's
+Gallery attributed to Ana — then Ben adds one and it lands in hers.
+
+```
+kith doctor          # is this Device set up?
+kith init <name>     # mint your Identity
+kith create walls    # a Circle, and its Collection
+kith add ~/Pictures/Wallpapers/*
+kith invite          # a code to send over a channel you already trust
+kith                 # the TUI: Gallery, Preview, Members
+```
+
+Build it with `cargo build --release`; you need a Syncthing daemon already running.
+`kith doctor` names anything missing.
+
+Not yet done: a second Device per Person, Activity, Notifications, the Health screen,
+rotation, and Search — see the [ROADMAP](ROADMAP.md#4-after-v01) for which milestone
+each lands in.
 
 | Document | What it locks |
 |---|---|
@@ -37,15 +56,9 @@ started. The paper trail:
 
 This repo began as **wp-sync**, a one-script bash wallpaper syncer. kith is its
 successor, not a port. The script stays at
-[`wp-sync-setup.sh`](wp-sync-setup.sh) and keeps working until v0.1 ships; existing
-installs are not stranded — kith adopts the synced wallpaper folder you already have
+[`wp-sync-setup.sh`](wp-sync-setup.sh) and keeps working; existing installs are not
+stranded — `kith create --adopt` takes over the wallpaper directory you already sync
 rather than recreating it.
-
-## Handoff
-
-- [ ] At build start, rename the repo `opx0/wp-sync` → `opx0/kith`. GitHub redirects
-      old URLs (clones, remotes, and the existing `curl | bash` install line keep
-      working); update the install instructions after the rename.
 
 ## License
 
