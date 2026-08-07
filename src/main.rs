@@ -168,12 +168,19 @@ async fn doctor() -> i32 {
         }
     }
 
-    let backends = WallpaperProvider::default().detected();
-    if backends.is_empty() {
-        println!("warn  no wallpaper backend detected (looked for swww, hyprpaper, feh)");
-        println!("      Apply will be shown as unavailable until one is installed");
-    } else {
-        println!("ok    wallpaper backend: {}", backends.join(", "));
+    let settings = config::load();
+    match &settings.apply_command {
+        Some(_) => println!("ok    wallpaper backend: your configured apply command"),
+        None => {
+            let backends = WallpaperProvider::default().detected();
+            if backends.is_empty() {
+                println!("warn  no wallpaper backend detected (looked for swww, hyprpaper, feh)");
+                println!("      Apply will be shown as unavailable until one is installed,");
+                println!("      or until you set provider.wallpaper.custom.apply in config.toml");
+            } else {
+                println!("ok    wallpaper backend: {}", backends.join(", "));
+            }
+        }
     }
 
     match identity::load() {

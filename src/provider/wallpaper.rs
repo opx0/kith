@@ -82,7 +82,7 @@ impl ApplyBackend for Hyprpaper {
         "hyprpaper"
     }
     fn detect(&self, env: &SessionEnv) -> bool {
-        env.wayland && on_path("hyprctl")
+        env.wayland && on_path("hyprpaper") && on_path("hyprctl")
     }
     fn targets(&self) -> Result<Vec<ApplyTarget>, ActionError> {
         Ok(vec![ApplyTarget::AllMonitors])
