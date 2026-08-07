@@ -20,9 +20,10 @@ fills up" is specified here.
 
 Three rules from the ADRs bind every flow below and are not re-argued:
 
-1. **One steward per Circle.** The Circle's admin holds one Device, and that Device is the
-   only route in or out (ADR-0002 §3 calls it the Circle's single introducer, below the
-   seam). Membership changes stall when it is offline; content does not.
+1. **One Steward per Circle.** A Steward is a **Member** — the Person holding `Admin` — and
+   it is the *Steward's Device* that is the Circle's only route in or out (ADR-0002 §3 calls
+   that Device the Circle's single introducer, below the seam). Membership changes stall
+   when the Steward's Device is offline; content does not.
 2. **Gates that run on the gatekeeper's own Device are real; everything after admission is
    convention plus recovery** (ADR-0002 §4). Admission is the one real gate kith has. It
    is therefore the only thing this spec is allowed to describe as enforcement.
@@ -38,8 +39,9 @@ Three rules from the ADRs bind every flow below and are not re-argued:
 | **Person** | Identified by a stable Person id minted at `kith init` (#12). This spec assumes only that it is stable and maps to one or more Device Identities. Examples use ULID form: `p-01k9r7wq3f8bx2m5nz4h7cvted`. |
 | **Device** | Identified by `DeviceId` — the seam's opaque handle on the Device's engine identity (ADR-0002 §1), printed as 52 base32 characters. v0.1: one Device per Person. |
 | **Circle** | `CircleId` = `kith-` + 8 base32 characters, minted by the engine at creation, immutable, never derived from the name (ADR-0002 §2). Has a name, a root path on this Device, exactly one Collection, and exactly one admin. |
-| **Member** | A Person's participation in one Circle: display name, Device Identities, Role, joined-at, optional left-at, plus a *presence* value that is computed live and never stored. |
+| **Member** | A Person's participation in one Circle: display name, Role, joined-at, optional left-at, the Device set *derived* from that Person's Membership claims (§2.2), plus a *presence* value that is computed live and never stored. |
 | **Role** | `Admin` or `Member`. Exactly one `Admin` per Circle in v0.1. Policy, not enforcement (§3.8). |
+| **Steward** | The **Member** whose Device is the Circle's sole route in or out. In v0.1 the Steward is the one `Admin`. A Steward is a Person, never a machine; where this spec means the machine it says *the Steward's Device*. |
 | **Invite** | A time-bounded offer to join, materialised as a printed code (§3.2.1) plus an *invite window* recorded on the admin's Device (§3.2.3). |
 | **Collection** | Created with the Circle, one per Circle, provider `wallpaper`. This spec creates it and stops; Items and import are `docs/spec/collections.md` (#14). |
 | **Sync Engine** | Every engine interaction is a call on the `SyncEngine` trait (ADR-0002 §1). This spec adds no method to it. |
@@ -65,7 +67,7 @@ pub struct Circle {
 pub enum Stewardship {
     /// Exactly one Person holds Role::Admin in `.kith/roles`.
     Held { person: PersonId },
-    /// The admin wrote `left_at` into their own Member record (§3.9.3).
+    /// The admin wrote `left_at` into their own Device's Membership claim (§3.9.3).
     Vacant { since: DateTime<Utc>, was: PersonId },
     /// Conflict copies exist on `.kith/roles`, or it names 0 or >1 admins.
     Disputed { claimants: Vec<PersonId> },
@@ -74,6 +76,8 @@ pub enum Stewardship {
 pub struct Member {
     pub person: PersonId,
     pub display_name: String,
+    /// Derived, never stored: every Device whose Membership claim carries this `person`
+    /// (§2.2). v0.1 length 1.
     pub devices: Vec<DeviceId>,
     pub role: Role,
     pub joined_at: DateTime<Utc>,
@@ -94,7 +98,7 @@ pub enum Presence {
     Unknown,
 }
 
-/// A Device present in the Circle that matches no Member record yet (§3.7).
+/// A Device present in the Circle with no Membership claim of its own yet (§3.7).
 pub struct UnclaimedDevice { pub device: DeviceId, pub announced_name: String, pub presence: Presence }
 
 impl<E: SyncEngine> Circles<E> {
@@ -126,6 +130,7 @@ pub enum SocialError {
     NotAMember { circle: CircleId },
     Invite(InviteError),
     AmbiguousCircle(Vec<Circle>),
+    /// `.kith/roles` only — a Membership claim cannot produce this (§4.9).
     DisputedRoster { record: PathBuf, claimants: Vec<PersonId> },
     Io(std::io::Error),
 }
@@ -140,14 +145,39 @@ tree is the source of truth and the cache is rebuildable.
 | Record | Sole legitimate writer | Fields |
 |---|---|---|
 | `.kith/circle` | the founding Device, **write-once** | `circle_id`, `name`, `created_at`, `created_by` (Person id), `collection.id` (`default`), `collection.name`, `collection.provider` (`wallpaper`), `collection.root` (`.`), `kith_version` |
-| `.kith/roles` | the steward Device | map Person id → `admin`. **v0.1 invariant: exactly one entry.** A Person absent from this record is a `member`; there is no `member` entry to write, so approving a join writes nothing here. |
-| `.kith/members/<person-id>` | that Person's own Device, and no other | `person_id`, `display_name`, `devices` (list of `DeviceId`; v0.1 length 1), `joined_at`, `left_at` (absent until §3.9), `kith_version` |
+| `.kith/roles` | the Steward's Device | map Person id → `admin`. **v0.1 invariant: exactly one entry.** A Person absent from this record is a `member`; there is no `member` entry to write, so approving a join writes nothing here. |
+| `.kith/members/<device-id>.toml` — a **Membership claim** | the Device its filename names, and no other | `person_id`, `display_name`, `joined_at`, `left_at` (absent until §3.9), `kith_version` |
+
+**A Membership claim is keyed by Device, not by Person** (ADR-0004 §5). One Device, one
+file, one writer: the Device named in the filename is the only Device that ever writes it,
+and the claim is that Device saying *I am here, and I speak for this Person*.
+
+There is therefore no `devices` list in the record. **A Person's Device set is derived** by
+grouping every claim carrying the same `person_id`, and a Person is in the Circle because at
+least one claim names them. Device-keying is what makes ADR-0004's W1 rule — exactly one
+writer per file — literally true here, and it is what makes v0.3's second Device
+migration-free: a second Device writes a second claim instead of contending with the first
+over one file. Attribution is unaffected, because it never keyed on the filename:
+`person_id` lives *inside* the claim, and nothing above the seam identifies a Member by
+Device.
+
+Three derivations follow, stated once here and used throughout §3 (ADR-0004 §5 fixes the
+same rules at the byte level):
+
+- **A Person's display name** comes from their most recently written claim — newest
+  `joined_at`, ties broken by the smaller Device id. v0.1 has one claim per Person, so this
+  rule never actually chooses.
+- **A Member has left** when *every* claim carrying their `person_id` has `left_at`. One
+  claim with it and one without means a Device stopped, not that the Person did.
+- **An unclaimed Device** is a Device in the Circle with no `.kith/members/<its-id>.toml` at
+  all — a filename lookup rather than a scan of every Member's Device list (§3.7).
 
 **The one property this spec requires of ADR-0004: every record above has exactly one
 legitimate writer.** The social core therefore needs no merge rule, and a conflict copy on
-any of these paths is always a *symptom* — kith surfaces it as a dispute (§4.9) instead of
-picking a winner. `.kith/local/` is per-Device scratch, excluded from replication by the
-ADR-0002 §2 recipe, and nothing in this spec writes there.
+any of these paths is a *symptom* rather than a decision to make — §4.9 says what kith does
+with each, and for a Membership claim it is never "pick a winner between two People".
+`.kith/local/` is per-Device scratch, excluded from replication by the ADR-0002 §2 recipe,
+and nothing in this spec writes there.
 
 ### 2.3 The local records this spec owns
 
@@ -159,7 +189,7 @@ ADR-0001's authority rule they may not live in SQLite. They live in
 | Path | Holds | Loss behaviour |
 |---|---|---|
 | `invites.json` | per Circle: `{circle_id, nonce, issued_at, expires_at, state: open\|spent\|expired\|superseded, spent_by}` | Every window reads as closed → every knock is *unsolicited* (§3.5.1) → the human confirms. Safe, noisier. |
-| `knocks.json` | joiner side: `{circle_id, circle_name, nonce, steward: DeviceId, root, state: knocked\|offered\|joined\|abandoned, first_knock_at}` | Re-run `kith join <code>`; a duplicate knock is idempotent at the engine. |
+| `knocks.json` | joiner side: `{circle_id, circle_name, nonce, steward_device: DeviceId, root, state: knocked\|offered\|joined\|abandoned, first_knock_at}` | Re-run `kith join <code>`; a duplicate knock is idempotent at the engine. |
 | `dismissed.json` | per Circle: `DeviceId`s the Person rejected, with `rejected_at` | Rejected Devices reappear in the pending list; reject them again. |
 
 ---
@@ -189,16 +219,18 @@ ADR-0001's authority rule they may not live in SQLite. They live in
    another Circle's root, and is created with mode `0700`.
 2. **`engine.create_circle(name, root)`** → `CircleRef { id, name, root }`. Below the seam
    this allocates the replicated space with the ADR-0002 §2 recipe (bidirectional,
-   watcher on, 5 versions / 30 days, the `.kith/local` exclusion) and makes this Device the
-   Circle's steward. kith does not touch any global engine setting.
+   watcher on, 5 versions / 30 days, the `.kith/local` exclusion) and designates this Device
+   as the Steward's Device for the Circle. kith does not touch any global engine setting.
 3. **Write `.kith/circle`** with the fields in §2.2, including the Collection descriptor —
    this *is* the Collection's creation. v0.1's one-Collection-per-Circle rule is expressed
    as a single descriptor in a record shaped for a list, so v0.3 adds Collections without a
    migration.
 4. **Write `.kith/roles`** naming this Person `admin`. This is what makes the founder the
-   admin; the steward Device and the admin Role are two views of one fact, and §3.9 keeps
-   them in step.
-5. **Write `.kith/members/<my-person-id>`** with display name, this `DeviceId`, `joined_at`.
+   admin; Steward and admin are one Member seen twice — the Role in the record, the
+   designation on their Device — and §3.9 keeps the two in step.
+5. **Write this Device's Membership claim**, `.kith/members/<my-device-id>.toml`, carrying
+   `person_id`, display name and `joined_at`. One file, one writer, for the life of the
+   Circle.
 6. Return. Nothing is invited, nothing is imported, nothing is applied.
 
 ```
@@ -248,7 +280,7 @@ bytes and is irreducible: it is the only thing that lets the invitee find the ad
 |---|---|---|---|
 | 0 | 1 | `version` = `0x01` | Mismatch → `InviteError::UnknownVersion`, refused before anything else is read |
 | 1 | 5 | `circle` | The 8 base32 characters after `kith-`, decoded |
-| 6 | 32 | `steward` | The admin Device's Identity, raw |
+| 6 | 32 | `steward_device` | The Steward's Device Identity, raw |
 | 38 | 4 | `expires_at` | Unix seconds, u32 big-endian |
 | 42 | 8 | `nonce` | 8 bytes from the OS CSPRNG. The invite's id. |
 | 50 | 1 | `name_len` (N) | ≤ 64 |
@@ -414,7 +446,7 @@ Step by step, from Ben's terminal:
    Confirmed with `y`, or `--yes`. The invitee chooses the path *here*, before any engine
    call, because ADR-0002 §1 puts path choice on the joiner and forbids `autoAcceptFolders`.
 6. **`engine.begin_join(&ticket)`.** The admin's Device is registered as this Circle's
-   steward and the knock goes out. Requires the engine (`exit 69` otherwise). This writes
+   Steward's Device and the knock goes out. Requires the engine (`exit 69` otherwise). This writes
    `knocks.json` first, so a crash between the two leaves a resumable record, never a
    silent knock.
 7. **Print the fingerprint** — the invitee's half of the out-of-band check:
@@ -438,12 +470,13 @@ Step by step, from Ben's terminal:
    kith, to pick it up.`
 9. **On `Change::CircleOffered(offer)`** — `engine.complete_join(&offer, root)`, but only
    if **both** the offer's `CircleId` equals the ticket's *and* the offerer is the ticket's
-   steward Device. Any other offer is never auto-accepted; it surfaces in the TUI as an
+   Steward's Device. Any other offer is never auto-accepted; it surfaces in the TUI as an
    unrequested Circle offer (§5.3) and is ignored by the CLI. This is the difference
    between accepting an invitation and accepting anything anyone sends you.
-10. **Write `.kith/members/<my-person-id>`** as soon as the root is writable: display name,
-    this `DeviceId`, `joined_at`. This is how the rest of the Circle learns Ben is a Person
-    and not just a Device (§3.7).
+10. **Write this Device's Membership claim**, `.kith/members/<my-device-id>.toml`, as soon
+    as the root is writable: `person_id`, display name, `joined_at`. This is how the rest of
+    the Circle learns that the Device it just admitted speaks for Ben, rather than being a
+    Device with no Person attached to it (§3.7).
 11. **Mark `knocks.json` `joined`**, print, exit 0.
 
     ```
@@ -491,26 +524,26 @@ pub enum Solicited {
 pub enum WindowClose { Expired, Spent, Superseded }
 ```
 
-A pending Device is offered against **every** Circle this Device stewards, because the
-engine's pending list is Circle-agnostic; `--circle` disambiguates and is required when the
-Person stewards more than one.
+A pending Device is offered against **every** Circle in which this Person is the Steward,
+because the engine's pending list is Circle-agnostic; `--circle` disambiguates and is
+required when this Person stewards more than one.
 
 #### 3.5.2 Approving
 
 1. Resolve the Circle (§5.1) and require `Role::Admin` on this Person **and** that this
-   Device is the Circle's steward. Otherwise `NotAdmin`, exit 1 (§3.9.3).
+   Device is the Steward's Device for the Circle. Otherwise `NotAdmin`, exit 1 (§3.9.3).
 2. `Stewardship::Vacant` or `Disputed` → `Stewardless`/`DisputedRoster`, exit 1. Nothing is
    admitted into a Circle whose admin has left or is contested.
 3. Show the prompt (§5.3) and require confirmation. `--yes` skips it only for
    `ByOpenInvite`; `ByClosedInvite` and `Unsolicited` additionally require `--force`, and in
    the TUI a second, differently-worded confirmation. Friction here is the feature.
 4. **`engine.admit(&circle, &request)`.** The Device joins the Circle's Device set and is
-   never designated a second steward (ADR-0002 §3's never-mutual rule).
+   never designated a second Steward's Device (ADR-0002 §3's never-mutual rule).
 5. Mark the invite window `spent`, recording the admitted `DeviceId` in `spent_by`. Single
    use, per the glossary.
 6. **Write nothing to the synced tree.** `.kith/roles` has no `member` entries by
-   construction (§2.2), and the joiner writes their own Member record. Approval therefore
-   cannot conflict with anything.
+   construction (§2.2), and the joining Device writes its own Membership claim into a path
+   no other Device writes. Approval therefore cannot conflict with anything.
 
 ```
 $ kith approve
@@ -540,7 +573,8 @@ Rejection is **local and needs no seam method**. `Circles::reject` records the `
 `dismissed.json`, and kith filters it out of every pending surface. It is deliberately not
 `engine.expel` (that removes an admitted Device) and deliberately not a dismissal at the
 engine, which the Device would undo by dialling again — a local ignore-list is strictly
-more durable and keeps the seam at ADR-0002's 16 methods.
+more durable, and it keeps the seam at ADR-0002's 17 methods instead of buying an
+eighteenth for state that never leaves this Device.
 
 ```
 $ kith reject UJZD-EGXD
@@ -561,10 +595,15 @@ After the admin approves Ben, in order:
 | 1 | Ben's Device is in the Circle's Device set on the admin's Device | immediately, locally | — |
 | 2 | Ben's kith receives the Circle offer | seconds, **while Ben's kith is running** | Queues; delivered next time Ben runs kith (§3.4 step 9) |
 | 3 | `complete_join` places the Circle; content and `.kith/` records begin flowing both ways | seconds to hours, by size | — |
-| 4 | Ben's `.kith/members/<ben>` reaches everyone connected | one sync cycle | Arrives when each Device next connects to anyone who has it |
-| 5 | Every **other** Member learns Ben's Device from the steward Device | the next time each of them connects to the steward Device | Until then Cara and Ben do not connect **directly** |
+| 4 | Ben's Device's Membership claim, `.kith/members/<ben-device>.toml`, reaches everyone connected | one sync cycle | Arrives when each Device next connects to anyone who has it |
+| 5 | Every **other** Member learns Ben's Device from the Steward's Device | the next time each of them connects to the Steward's Device | Until then Cara and Ben do not connect **directly** |
 
-Step 5 is the concrete cost of one steward (ADR-0002 §3), and it is visible: until Cara has
+Step 4 carries the whole of "Ben is a Person": one file, written once by one Device, that
+either has arrived or has not. There is no second writer to wait for and no existing record
+to be merged into, which is why a join adds a Member without any Device rewriting anything
+it already had.
+
+Step 5 is the concrete cost of one Steward (ADR-0002 §3), and it is visible: until Cara has
 learned Ben, everything Cara adds reaches Ben only while the admin's Device is online to
 relay it. `kith status` states this rather than leaving it as mysterious slowness:
 
@@ -576,8 +615,8 @@ walls · 3 Members · 2 reachable directly
 
 Between steps 1 and 4 the admin's Members screen shows Ben as an **unclaimed Device**
 (§3.7), which is also exactly how an adopted wp-sync peer (ADR-0002 §7) appears — a peer
-that syncs perfectly and has no Member record, possibly forever. One state, one rendering,
-no special case.
+that syncs perfectly and has no Membership claim, possibly forever. One state, one
+rendering, no special case.
 
 ### 3.7 Listing Members, and the honesty of presence
 
@@ -586,19 +625,21 @@ no special case.
 
 | Source | Contributes |
 |---|---|
-| `.kith/members/*` in the synced tree | Person id, display name, Device Identities, joined/left |
+| `.kith/members/*.toml` — every Membership claim in the synced tree | one claim per Device: the Device Identity in its filename, and `person_id`, display name, joined/left inside it. Grouping claims by `person_id` is what turns a pile of Devices into Members (§2.2) |
 | `.kith/roles` | which Person is `admin`; absence means `member` |
 | `engine.devices(&circle)` + `engine.status(&circle)` | which Devices are actually in the Circle, `connected`, per-peer completion |
 
 Cross-referencing produces exactly four rows, all of which must render:
 
-1. **Member with Devices in the Circle** — the normal row.
-2. **Unclaimed Device** — in the Circle, matching no Member record. Rendered by fingerprint,
-   labelled `no Member record yet`. Never hidden: a Device receiving the Circle's bytes must
-   appear in the Members screen even when kith cannot name it.
-3. **Member with no Device in the Circle** — record present, Devices absent. Either they
-   left (`left_at` set → `left · 3 Aug`) or they were never admitted / were removed
-   (`left_at` absent → `not in this Circle`).
+1. **Member with Devices in the Circle** — the normal row: one or more claims carrying their
+   `person_id`, each naming a Device the engine confirms is in the Circle.
+2. **Unclaimed Device** — in the Circle, with no `.kith/members/<its-id>.toml`. Rendered by
+   fingerprint, labelled `no Membership claim yet`. Never hidden: a Device receiving the
+   Circle's bytes must appear in the Members screen even when kith cannot name it.
+3. **Member with no Device in the Circle** — claims present, every Device they name absent
+   from the engine's Device set. Either they left (`left_at` on all of their claims →
+   `left · 3 Aug`) or they were never admitted / were removed (no `left_at` →
+   `not in this Circle`).
 4. **Self** — marked `(you)`; presence is `—`, not `connected`. kith does not have a
    connection to itself and will not pretend to.
 
@@ -641,7 +682,7 @@ MEMBER           ROLE    CONNECTED       IN SYNC  JOINED
 Ana (you)        admin   —               —        6 Aug
 Ben              member  connected       100%     7 Aug
 Cara             member  not connected   62%      6 Aug   (last connected 2h ago)
-·                        UJZD-EGXD — a Device with no Member record yet
+·                        UJZD-EGXD — a Device with no Membership claim yet
 
 "Connected" is this Device's view of right now: an open connection between this Device
 and theirs. It does not mean they are at their computer, and someone shown as not
@@ -650,8 +691,8 @@ connected may be connected to another Member.
 
 ### 3.8 Roles in v0.1
 
-Two Roles, one Circle-wide invariant: **exactly one `Admin`, and their Device is the
-Circle's steward.**
+Two Roles, one Circle-wide invariant: **exactly one `Admin` — that Member is the Circle's
+Steward, and their Device is its only route in or out.**
 
 | | `Admin` | `Member` |
 |---|---|---|
@@ -680,8 +721,8 @@ own Device. Concretely, in this spec's surface:
 #### 3.8.2 The caveat nobody likes: the Circle is as tight as its least careful Member
 
 A Member who is not the admin can, from their own Device, share the Circle with an outsider.
-kith refuses to do it — but nothing outside kith is stopped, and because only the steward
-Device's Device list propagates, **that outsider would sync with that one Member and might
+kith refuses to do it — but nothing outside kith is stopped, and because only the Steward's
+Device propagates its Device list, **that outsider would sync with that one Member and might
 never appear on the admin's Members screen at all.**
 
 This is stated in the Roles help text, not buried here. It is the honest reading of
@@ -766,10 +807,13 @@ Typing the name — not `y` — because this is the one irreversible social act 
 
 #### 3.9.2 What happens
 
-1. **Write `left_at` into `.kith/members/<my-person-id>`.** A tombstone in one's own
-   single-writer record, never a deletion: a delete-then-recreate is exactly the pattern
-   that produces conflict copies, and the record must survive to say "left" rather than
-   vanish into "was never here".
+1. **Write `left_at` into this Device's own Membership claim**,
+   `.kith/members/<my-device-id>.toml`. A tombstone in a file only this Device ever writes,
+   never a deletion: a delete-then-recreate is exactly the pattern that produces conflict
+   copies, and the claim must survive to say "left" rather than vanish into "was never
+   here" — it is also what keeps this Person's name on the Items they added (ADR-0004 §5).
+   By §2.2 a Member has left when *all* of their claims carry `left_at`; v0.1 has one claim
+   per Person, so leaving is one write on one Device and nothing to reconcile.
 2. **Give the tombstone a chance to travel.** kith waits up to 10 seconds for the change
    feed to report the Circle idle with at least one connected peer, then proceeds either
    way. Honest, and stated: if nobody is connected, the tombstone leaves with the Person and
@@ -777,11 +821,11 @@ Typing the name — not `y` — because this is the one irreversible social act 
    from offline (§4.6).
 3. **`engine.leave(&circle)`.** Replication stops. Local bytes are kept; ADR-0002 §1 is
    explicit that nothing is deleted here, and the confirmation already promised it.
-4. **Clear the steward designation on the admin's Device — conditionally.** The designation
-   is Device-scoped, not Circle-scoped (ADR-0002 §3's documented leak), so
+4. **Clear this Device's designation of the admin's Device — conditionally.** The
+   designation is Device-scoped, not Circle-scoped (ADR-0002 §3's documented leak), so
    `engine.set_introducer(&admin_device, false)` runs **only if no other Circle this Device
-   holds names that same Person as admin**. Otherwise it is left alone and `LeaveReport`
-   says which Circle kept it.
+   holds names that same Person as its Steward**. Otherwise it is left alone and
+   `LeaveReport` says which Circle kept it.
 5. Drop this Circle's rows from `invites.json`, `knocks.json`, `dismissed.json`. Keep the
    root on disk untouched.
 
@@ -822,7 +866,7 @@ arrives, and every surface says so:
 destroyed leaves no tombstone; their Circle shows an admin who is permanently `not
 connected`, and `kith status` says exactly that and nothing more. Both states are terminal
 for membership changes in v0.1 and harmless for content. This is the honest cost of one
-steward and no succession verb, accepted in ADR-0002 §3 and paid here.
+Steward and no succession verb, accepted in ADR-0002 §3 and paid here.
 
 ### 3.10 Member removal — v0.2, and what it will not do
 
@@ -832,7 +876,7 @@ constrains what §3.9's copy is allowed to promise today.
 When it lands (v0.2, `kith remove <member>` and Members screen `x`, admin only), it will be
 `engine.expel(&circle, &device)` per Device: the Device is dropped from the Circle's Device
 set on the admin's Device, and the removal cascades to every Member that learned of that
-Device from the steward, **as each of them next connects to it** (ADR-0002 §3). The
+Device from the Steward's Device, **as each of them next connects to it** (ADR-0002 §3). The
 admin also writes a removal tombstone into `.kith/roles`, so Members screens can say
 "removed" rather than "not in this Circle".
 
@@ -844,7 +888,7 @@ key:
   offer one, and any product that offers one over a peer-to-peer transport is lying.
 - **It is not instant.** It lands per Member, on their next connection to the admin's
   Device. Until then the removed Device may still sync with Members that have not caught up.
-- **The cascade only reaches what the steward taught.** A Device another Member added by
+- **The cascade only reaches what the Steward's Device taught.** A Device another Member added by
   hand is not reached by it — §3.8.2's least-careful-Member caveat, in its removal form.
 - **It does not remove their contributions.** Items they added stay in the Collection.
   Removing a Person and deleting their content are different acts, and conflating them
@@ -880,7 +924,7 @@ they are possible** — stated in `kith invite`'s own copy so it is not a surpri
 knock is engine config on the invitee's Device, and it persists across restarts. The pending
 entry only materialises on the admin's Device when the two actually connect. kith
 distinguishes the two waits because `engine.devices()` tells it whether *this* Device holds a
-connection to the steward Device (§3.4 step 8) — and stops there: a connection proves the
+connection to the Steward's Device (§3.4 step 8) — and stops there: a connection proves the
 request arrived, never that a human looked at it. If the invitee gives up, nothing is lost;
 re-running `kith join <code>` resumes from `knocks.json`, and an already-registered knock is
 idempotent.
@@ -905,11 +949,11 @@ identical. kith says so: after 24 hours of `knocked`, `kith join`'s wait line be
 `Still waiting. kith cannot tell whether they have not looked, said no, or stopped using
 kith. Ask them.`
 
-**4.6 A Member leaves while disconnected from everyone.** The `left_at` tombstone never
-travels. On every other Device that Person stays a Member whose Device never connects —
-identical to being offline. There is no fix without a server; `kith status` reports
-`not connected` and a `last connected` date, and the humans work it out. Documented, not
-papered over.
+**4.6 A Member leaves while disconnected from everyone.** The `left_at` never leaves their
+own Device's Membership claim, because that claim is the only place it is ever written. On
+every other Device that Person stays a Member whose Device never connects — identical to
+being offline. There is no fix without a server; `kith status` reports `not connected` and a
+`last connected` date, and the humans work it out. Documented, not papered over.
 
 **4.7 The Sync Engine is unreachable.** `create`, `join`, `approve` all refuse with exit 69
 and change nothing — each writes engine config, and kith does not queue engine writes.
@@ -921,17 +965,37 @@ kith cannot see anyone right now.` Never `not connected`, which would be a claim
 
 **4.8 Two People redeem invites to two different Circles from the same admin.** Both knocks
 land in one Circle-agnostic pending list. `--circle` is mandatory for `approve`/`reject`
-whenever this Device stewards more than one Circle, and the TUI prompt names the Circle in
-its title. Admitting a Device to the wrong Circle is a real and irreversible mistake, so
-kith never guesses.
+whenever this Person is the Steward of more than one Circle, and the TUI prompt names the
+Circle in its title. Admitting a Device to the wrong Circle is a real and irreversible
+mistake, so kith never guesses.
 
 **4.9 A single-writer record has conflict copies.** By §2.2 this cannot happen legitimately,
-so kith treats it as a dispute and never merges. `.kith/roles` in conflict, or naming zero
-or more than one admin → `Stewardship::Disputed`; `invite` and `approve` refuse; the Members
-screen shows `walls · this Circle disagrees about who its admin is` and lists the claimants.
-`.kith/members/<p>` in conflict → that row renders as `disputed` with the conflicting
-display names shown side by side; presence and sync still render, because those come from
-the engine and are unaffected. Resolution is v0.2's job. Refusing to guess is v0.1's.
+so kith never merges one — but what it *means* now differs sharply by record.
+
+`.kith/roles` in conflict, or naming zero or more than one admin → `Stewardship::Disputed`;
+`invite` and `approve` refuse; the Members screen shows `walls · this Circle disagrees about
+who its admin is` and lists the claimants. Resolution is v0.2's job. Refusing to guess is
+v0.1's.
+
+**A conflict copy of a Membership claim is near-impossible, and is never a dispute.** The
+filename names a Device and only that Device writes it (§2.2), so two writers of one claim
+are not two People disagreeing about a shared record — they are two machines asserting the
+same Device identity. What can still produce one: an install restored from backup, a cloned
+home directory or a copied VM, and a Person hand-editing `.kith/`. kith reads the newest
+claim, renders the Member row normally, and reports the fault as what it actually is —
+`a Device identity is in use on more than one machine` — rather than as a `disputed` Member.
+The owning Device re-asserts its claim and deletes the copy (ADR-0004 §8); no other Device
+touches it. Nothing is blocked meanwhile: a claim is not a gate, admission runs on the
+Steward's Device (§3.8.1), and presence and sync percentages come from the engine either
+way. Two claims naming *different* Devices with the same `person_id` are not a conflict at
+all — that is a Person with two Devices, which is v0.3 arriving early and handled by §2.2's
+derivations.
+
+What single-writer does **not** buy, and no surface may imply it does: any admitted Device
+can write a claim for a Device that is not it, carrying any `person_id` it likes. That
+produces no conflict copy and kith cannot detect it. Device-keying removes the accident, not
+the forger — claims are convention, not cryptography (ADR-0004 §5) — and §3.8.2 is the
+honest reading either way.
 
 **4.10 A Circle root with no `.kith/circle` record.** Either a join whose first sync has not
 delivered it, or a root a Person emptied. It is listed as `walls · waiting for the Circle's
@@ -978,7 +1042,7 @@ section owns the semantics of these verbs and screens, and the copy in §3 is no
 **Circle resolution**, everywhere `--circle` appears: exact name → unique `CircleId` prefix
 → if the Person has exactly one Circle, omitting it is allowed → otherwise
 `AmbiguousCircle`. `approve` and `reject` additionally require `--circle` whenever this
-Device stewards more than one Circle (§4.8), one Circle or not.
+Person is the Steward of more than one Circle (§4.8), one Circle or not.
 
 **Exit codes**, aligned with ADR-0003 §2 so the whole binary speaks one dialect:
 
@@ -1010,7 +1074,7 @@ Reached with `m`; one of the five surfaces ROADMAP §2 allows.
 │ Ana (you)       admin   —              —        6 Aug            │
 │ Ben             member  connected      100%     7 Aug            │
 │ Cara            member  not connected   62%     6 Aug            │
-│ ·               UJZD-EGXD — a Device with no Member record yet   │
+│ ·               UJZD-EGXD — a Device with no Membership claim    │
 ├──────────────────────────────────────────────────────────────────┤
 │ Roles are an agreement, not a lock. Any Member can add or delete  │
 │ anything here; every other Device keeps 30 days of previous       │
@@ -1052,7 +1116,7 @@ The modal never auto-dismisses and never times out. `[esc]` is free and the requ
 the header — a prompt that punishes hesitation trains people to press yes.
 
 **Mode B — Circle offered (joiner side).** Triggered by `Change::CircleOffered`. If the
-offer matches a `knocked` row in `knocks.json` — same `CircleId`, same steward Device — it
+offer matches a `knocked` row in `knocks.json` — same `CircleId`, same Steward's Device — it
 shows `walls is ready. Place it at ~/.local/share/kith/circles/walls?` with a path editor
 and completes on confirm. If it matches nothing, it shows
 `A Device you have not asked to join anything is offering you a Circle.` with the offerer's
@@ -1089,9 +1153,9 @@ Everything below is named so it can be refused by pointing at a line, per ROADMA
 | Circle rename, Circle delete, Circle settings | not scheduled; `.kith/circle` is write-once until one exists |
 | Restore of versioned content (`kith restore`) — the copy in §3.8.3 promises versions are *kept*, never that v0.1 restores them | v0.3, with History |
 | More than one Collection per Circle; per-Collection membership | v0.3 — the descriptor in `.kith/circle` is already list-shaped |
-| A second Device per Person; Device management, Device naming, per-Device presence rollup UI | v0.3 — `Member.devices` is already a list and `Presence` already rolls up |
+| A second Device per Person; Device management, Device naming, per-Device presence rollup UI | v0.3 — a second Device is a second Membership claim, `Member.devices` is already derived by grouping them (§2.2), and `Presence` already rolls up |
 | QR codes, `kith://` links, any invite transport | not scheduled (ROADMAP §5); the base32 body is QR-alphanumeric-safe if that changes |
 | Signed invites, invite-to-a-named-Person binding, any home-grown cryptography | not scheduled (ROADMAP §5) |
 | Telling a rejected or removed Person anything | never — there is no server to deliver it |
 | Read receipts, "seen by", activity-derived presence | never — §3.7.1, and Favourites are private for the same reason |
-| Blocking a Device from knocking at the engine level | never — the local ignore-list (§3.5.3) is more durable and keeps the seam at 16 methods |
+| Blocking a Device from knocking at the engine level | never — the local ignore-list (§3.5.3) is more durable and adds no eighteenth method to ADR-0002's 17-method seam |

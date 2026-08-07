@@ -44,7 +44,7 @@ Three rules, in force everywhere in `.kith/`:
 
 W1 keys on **Device**, not Person, because a Person gets a second Device in v0.3 and the
 invariant must not need re-earning. Attribution keys on **Person**, carried *inside* the
-records. The two are bridged by per-Device membership claims (§5).
+records. The two are bridged by the per-Device Membership claim (§5).
 
 The consequence worth stating plainly: **this design is a CRDT** — a grow-only set of records
 with a deterministic reducer. It is just one whose on-wire format is `tail -f`-able text and
@@ -63,7 +63,7 @@ is the tree root, adopting the existing wp-sync layout rather than recreating it
 │   ├── circle.toml                             # written once, by the founding Device
 │   ├── collections/
 │   │   └── main.toml                           # one Collection descriptor per Collection
-│   ├── members/
+│   ├── members/                                # one Membership claim per Device
 │   │   ├── P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2.toml
 │   │   └── K5J2FVL-B3QTXAO-7SWNDUE-HMR4YZI-6CPGA2N-XQTLB5V-JW3EOHY-RD6MSAK.toml
 │   ├── items/
@@ -79,7 +79,8 @@ is the tree root, adopting the existing wp-sync layout rather than recreating it
 **Hidden from the Gallery** (never a tile, never adopted as an Item, never hashed):
 `.kith/**`, every path the engine declares as its own, and `*.sync-conflict-*` — the last
 surfaced as a resolve affordance instead, per ADR-0002 §2. This ADR asks ADR-0002's trait for
-exactly one addition, so those names stay behind the seam:
+exactly one addition, so those names stay behind the seam — ADR-0002 §1 carries it as of its
+2026-08-07 amendment:
 
 ```rust
 /// Globs the engine owns inside a Circle root. The core hides them from the
@@ -273,10 +274,10 @@ produce records with *identical* `at`, so §4.4 step 3's tie-break reduces to de
 Devices reach the same answer without talking.
 
 This is not a corner case — it is the wp-sync migration path (ADR-0002 §7), where Ana and Ben
-already hold the same 200 wallpapers and both run `kith adopt`. The cost is one redundant
-record per Item per Device (~50 KB per 200 Items), one-off and bounded. The visible artefact is
-honest and brief: until both logs have crossed, a Device may show a duplicate tile that merges
-when the peer's log arrives.
+already hold the same 200 wallpapers and both run `kith create --adopt`. The cost is one
+redundant record per Item per Device (~50 KB per 200 Items), one-off and bounded. The visible
+artefact is honest and brief: until both logs have crossed, a Device may show a duplicate tile
+that merges when the peer's log arrives.
 
 Adoption also covers coexistence: a peer still running plain wp-sync writes bytes and no
 records. Their additions are adopted and attributed to whichever kith Person adopted them —
@@ -284,10 +285,14 @@ marked `adopted`, so Preview can say *found by Ana* rather than claim she added 
 
 ### 5. Identity, attribution and Roles
 
-Each Device asserts itself once per Circle, in a file only it writes:
+Each Device asserts itself once per Circle in a **Membership claim**: one file at
+`.kith/members/<device-id>.toml`, keyed by the **Device** and written only by the Device it
+names. It is W1 applied to identity — the path carries its writer, so no two Devices ever
+touch one claim, and a Person's second Device in v0.3 adds a second claim instead of
+contending for one file.
 
 ```toml
-# .kith/members/<device-id>.toml
+# .kith/members/<device-id>.toml — the Membership claim; sole writer = this Device
 schema       = 1
 device       = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2"
 person       = "01K1YFQ2M7VJ3W8T0PZ4RXAB6C"
@@ -305,13 +310,20 @@ Written by the founder at `create_circle` and by the joiner immediately after
 and going: an expelled Device's claim stays in the tree, so its records keep resolving to a
 named Person forever.
 
+**Keyed by Device, attributed to Person.** The filename and the `device` field exist only to
+satisfy W1 and to bridge to the engine's device list (`SyncEngine::devices()`). Every fact the
+product states — who added an Item, who is a Member, whose Role is what — keys on the
+**PersonId** carried *inside* the claim, and is never expressed as a DeviceId. That split is
+the whole reason v0.3's second Device is one more file rather than a migration: the set of
+claims sharing a `person` *is* the Person, and the reducer never learns a new shape.
+
 Derivation:
 
 | Question | Answer |
 |---|---|
-| Who is Person P? | Devices = every claim with `person = P`; display name = the claim with the newest `asserted` (ties → smallest device id, and `doctor` reports the disagreement). |
-| Who added this Item? | The `by` of the winning `add`, resolved through the roster. No claim → *Unknown Person (`P56IOI7…`)*, never a blank. |
-| What is P's Role? | v0.1: `admin` iff P is `circle.toml`'s `founder_person` or the current steward's Person; otherwise `member`. Role *editing* (v0.2) lands as a `[grants]` table in the steward's own claim file — still single-writer, still no migration. |
+| Who is Person P? | Devices = every Membership claim with `person = P`; display name = the claim with the newest `asserted` (ties → smallest device id, and `doctor` reports the disagreement). |
+| Who added this Item? | The `by` of the winning `add`, resolved through the Membership claims. No claim → *Unknown Person (`P56IOI7…`)*, never a blank. |
+| What is P's Role? | v0.1: `admin` iff P is `circle.toml`'s `founder_person` or the current Steward; otherwise `member`. Role *editing* (v0.2) lands as a `[grants]` table in the Membership claim of the Steward's Device — still single-writer, still no migration. |
 
 **Circle and Collection descriptors** are the two singletons, and v0.1's ROADMAP row ("no
 rename, no delete, no Circle settings") makes them write-once:
@@ -389,8 +401,8 @@ here, and this is the one place the honest answer is also the *convergent* one:
   it never pretends the refusal would have stopped anyone.
 - Readers **always honour a tombstone**, including one written by a Member whose Role would not
   have permitted it. The alternative — honouring removals conditionally on a derived Role —
-  makes two Devices disagree about the Gallery depending on when the roster reached them. A
-  policy check that costs convergence buys nothing, because it enforces nothing.
+  makes two Devices disagree about the Gallery depending on when the Membership claims reached
+  them. A policy check that costs convergence buys nothing, because it enforces nothing.
 
 Restore (v0.3 History) needs no new record kind: restore the bytes through
 `SyncEngine::restore`, append a `bind`, and §4.4's revival rule does the rest.
@@ -434,7 +446,7 @@ always edit `.kith/` by hand. The response is **absorb, never resolve**:
 |---|---|---|---|
 | Record log | Merge the conflict copy as one more log (W3 makes this free — the union is unchanged by which copy won). | On startup: append records absent from its own log, then delete the conflict copy. Only the owning Device ever deletes one. | Reports each absorption. |
 | `circle.toml` | Keep the copy with the earliest `created` — the original. | n/a (write-once). | Reports it loudly: someone rewrote a write-once record. |
-| Member claim | Keep the newest `asserted`. | Owner re-asserts and deletes the copy. | Reports it. |
+| Membership claim | Keep the newest `asserted`. | Owner re-asserts and deletes the copy. | Reports it. |
 | Collection descriptor | Keep the newest `created`; ties → smallest content hash. | Owner re-writes and deletes the copy. | Reports it. |
 
 Two anomalies get named rather than papered over, because both mean something is genuinely
@@ -462,7 +474,7 @@ to change in any release without touching a Circle.
 
 1. Drop the database file; recreate it empty.
 2. For each `CircleRef` from `SyncEngine::circles()`: read `circle.toml`, every
-   `collections/*.toml`, every `members/*.toml`.
+   `collections/*.toml`, every `members/*.toml` Membership claim.
 3. Stream every `items/<collection>/*.jsonl` (conflict copies included) through §4.4's reducer,
    recording each log's end offset and `seq`.
 4. Walk each Collection root, hashing Provider-claimed files, and reconcile per §4.4 step 5 —
@@ -486,7 +498,7 @@ are stated because a timeline that lies is worse than no timeline:
 
 | Half | Derived from | Consistency |
 |---|---|---|
-| **Durable, Circle-wide** | `add` (Item added by P at T), `remove` (removed by P at T), member claims (`asserted` → Person joined) | Survives cache rebuild, replays identically on every Device, and is complete for everything the Device has received. |
+| **Durable, Circle-wide** | `add` (Item added by P at T), `remove` (removed by P at T), Membership claims (`asserted` → Person joined) | Survives cache rebuild, replays identically on every Device, and is complete for everything the Device has received. |
 | **Ephemeral, Device-local** | the engine change feed: peers connecting, sync errors, arrival times | Not replicated, not replayable, starts when kith started, and gone after `Change::Desynced`. |
 
 Honest limits, to be printed near the feature rather than discovered:
@@ -523,8 +535,8 @@ Honest limits, to be printed near the feature rather than discovered:
   then deletes generation 1. No in-place rewrite, so W2 survives compaction, and §4.3's naming
   rule already reads it.
 - **Reserved and unwritten in v0.1**, each with its milestone: the `meta` record (titles and
-  tags, v0.3), `[steward]` in a member claim (succession command, v0.2), `[grants]` in the
-  steward's claim (role editing, v0.2), `sig` on a record (v1.0). Moving an Item between
+  tags, v0.3), `[steward]` and `[grants]` in the Membership claim of the Steward's Device
+  (succession command and role editing, v0.2), `sig` on a record (v1.0). Moving an Item between
   Collections (v0.3) needs no reservation at all: Item ids are Collection-independent, so it is
   a `remove` in one log and an `add` with the same id in another.
 
@@ -561,7 +573,7 @@ Honest limits, to be printed near the feature rather than discovered:
   succession, tombstones, removal recovery — instead of a promise deferred to code review.
 
 **Deliberately deferred:** compaction and generations (v0.3); signed records (v1.0); `meta`
-writes, tags and title editing (v0.3); steward succession and role grants (v0.2); Item lineage
+writes, tags and title editing (v0.3); Steward succession and Role grants (v0.2); Item lineage
 across re-encode beyond the `bind` record; any cross-Device sync of Favourites.
 
 ## Alternatives considered

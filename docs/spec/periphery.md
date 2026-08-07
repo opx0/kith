@@ -33,7 +33,7 @@ it is the property that makes the periphery cheap to defer and safe to add.
 
 | Module | Lands in | Reads (all of it exists at v0.1) | Writes |
 |---|---|---|---|
-| **Activity** | v0.2 | `add`/`remove` records, member claims, the change feed | nothing |
+| **Activity** | v0.2 | `add`/`remove` records, Membership claims, the change feed | nothing |
 | **Notifications** | v0.2 | the change feed | nothing |
 | **Health** | v0.2 (the screen) | `MetadataHealth`, `SyncEngine::status`/`devices`, the version archive | nothing |
 | **Automation I** | v0.2 | Favourites | the rotation cursor, in the rebuildable cache |
@@ -54,7 +54,7 @@ never a convenience.
 | Object | How the periphery touches it |
 |---|---|
 | **Circle** | The scope of every view here. It is the boundary of trust, and therefore also the boundary of a result list, a timeline and a health panel. |
-| **Person / Member / Role** | Named in Activity and Notifications by attribution resolved through the roster (ADR-0004 §5); every Role shown carries the caveat (ADR-0002 §4). |
+| **Person / Member / Role** | Named in Activity and Notifications by attribution resolved through the Membership claims at `.kith/members/<device-id>.toml` (ADR-0004 §5) — always to a PersonId, never a DeviceId; every Role shown carries the caveat (ADR-0002 §4). |
 | **Item / Sidecar** | The derived `ItemView` is the row Search filters, the line Activity narrates, and the placeholder Health explains. |
 | **Favourite** | Automation's entire pool, and the mechanism by which consent is structural (ADR-0003 §6). Local, never synced, never announced. |
 | **Provider / Action / Apply** | The Plugin system's first two capabilities, already designed as ADR-0003 §2's frozen protocol. Rotation is the wallpaper Provider's, not Automation's. |
@@ -75,7 +75,7 @@ joined (CONTEXT.md). A view, never a log anyone is authoritative about.
 **Constraint carried.** ADR-0004 §10 already fixed both the derivation and its honesty, and left
 Activity nothing to invent. The timeline has two halves that must stay visually distinct because
 only one survives a cache rebuild: the **durable, Circle-wide** half (`add` and `remove` records,
-member claims' `asserted`) replays identically on every Device; the **ephemeral, Device-local**
+Membership claims' `asserted`) replays identically on every Device; the **ephemeral, Device-local**
 half (peers connecting, sync errors, arrival times, from the change feed) starts when the process
 started. Four limits ship printed next to the feature, not discovered: no happens-before, so
 two Members acting in the same second may show in either order (wall-clock order plus §4.4's
@@ -165,7 +165,7 @@ II** — *"Automation II (rules, import watch)"*.
 **Constraint carried, twice.** (1) **Consent is structural** (ADR-0003 §6): any automation whose
 effect reaches a screen draws only from the Person's Favourites. A rule may choose *which*
 Favourite and *when*; it may never widen the pool, and unfavouriting withdraws consent
-immediately. ADR-0002 §7 already applied this once — `kith adopt` retires wp-sync's systemd path
+immediately. ADR-0002 §7 already applied this once — `kith create --adopt` retires wp-sync's systemd path
 unit precisely because auto-apply without consent contradicts the rule. Import watch may create
 Items; it may never Apply one. (2) **kith is a verb, not a daemon** (ADR-0003 §7): the schedule
 lives in the host scheduler, and rules are evaluated by a `kith` process something else started.

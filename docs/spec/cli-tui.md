@@ -15,9 +15,9 @@ the config file, and `kith doctor`'s checks.
 The surface is closed. ROADMAP §2 fixes the CLI at eleven verbs plus bare `kith`, and the
 TUI at Gallery, Preview, Members, a pending-join prompt and a Circle switcher. **Nothing
 in this document adds a verb or a screen.** Where an ADR names a verb that ROADMAP does
-not (`kith apply`, `kith rotate`, `kith restore`, `kith adopt`), it is placed in "Out of
-scope for v0.1" with its milestone, or folded into an existing verb as a flag — never
-smuggled in.
+not (`kith apply`, `kith rotate`, `kith restore`), it is placed in "Out of scope for v0.1"
+with its milestone, or folded into an existing verb as a flag — as adoption is, on
+`create` (§4.2) — never smuggled in.
 
 Gallery and Preview are described here only as far as navigation requires. Their tiles,
 sorting, unseen/favourite markers, Sidecar fact layout and the Action set belong to
@@ -72,7 +72,7 @@ confirmations — and only when stderr is a terminal; otherwise it takes the fla
 | `-q, --quiet` | Suppress narration on stderr. Data on stdout is unaffected. |
 | `-v, --verbose` | Repeatable. `-v` adds seam-level diagnostics to stderr, `-vv` adds every Sync Engine request/response line. |
 | `-h, --help` | clap-generated, exit 0. |
-| `-V, --version` | One line, exit 0. The richer report is `kith version` (§4.11). |
+| `-V, --version` | One line, exit 0. The richer report is `kith version` (§4.10). |
 
 All are `global = true`, so they parse before or after the verb.
 
@@ -283,9 +283,9 @@ single introducer (ADR-0002 §3).
   Adoption prompts once, on stderr, for the `autoAcceptFolders` cleanup ADR-0002 §7
   describes, defaulting to **no**; `--quiet` or a non-terminal stderr skips the prompt and
   leaves the setting alone with a `warn` note.
-  *Call recorded here:* ADR-0002 spells this `kith adopt`. ROADMAP's CLI surface has no
-  such verb, and adoption is a way of creating a Circle, not a capability of its own — so
-  it is a flag on `create`.
+  ROADMAP's CLI surface has no `adopt` verb, and adoption is a way of creating a Circle,
+  not a capability of its own — so it is a flag on `create`, and ADR-0002 §7 spells it
+  `kith create --adopt` too.
 - Requires Identity and the engine: missing Identity → 64, unreachable → 69, nothing written.
 
 `data`: `{"circle":{"id":"kith-4npq7x2b","name":"walls","root":"/home/ana/kith/walls","role":"admin","introducer":true,"adopted":false}}`
@@ -985,10 +985,10 @@ cache sizes and TUI layout (not settings — behaviour).
 | `$XDG_STATE_HOME/kith/state.toml` | `last_circle`, TUI leftovers | Rebuildable; deleting it costs a switcher press |
 | `$XDG_STATE_HOME/kith/invites.toml` | Invites this Device issued, with expiry | Local; the admit-time expiry check reads it (§4.5) |
 | `$XDG_STATE_HOME/kith/pending-joins.toml` | Invites consumed, awaiting an offer | Local; consumed by the auto-completion rule (§4.4) |
-| `$XDG_CACHE_HOME/kith/cache.db` | SQLite cache, event cursor | Rebuildable by ADR-0001's authority rule; deletable at any time |
+| `$XDG_CACHE_HOME/kith/cache.sqlite3` | SQLite cache, event cursor | Rebuildable by ADR-0001's authority rule; deletable at any time |
 | `$XDG_CACHE_HOME/kith/thumbs/` | `<content-hash>-<class>.png` (ADR-0003 §5) | Rebuildable |
 | `<circle root>/` | Items | Source of truth |
-| `<circle root>/.kith/` | Sidecars, roster, Roles (ADR-0004) | Synced source of truth |
+| `<circle root>/.kith/` | Sidecars, Membership claims (`members/<device-id>.toml`), Roles (ADR-0004) | Synced source of truth |
 | `<circle root>/.kith/local/` | Per-Device scratch, never synced | Rebuildable |
 
 Favourites are per-Person and never cross the seam (ADR-0002 §2); where their bytes live
@@ -1086,7 +1086,7 @@ Named, with the milestone that gets them, so each can be refused by pointing at 
 | `kith rotate` (ADR-0003 §7) | Automation is cut from v0.1 | v0.2 |
 | `kith leave` as a verb | Leaving exists in v0.1 — on the Members screen | v0.2 with CLI parity |
 | `kith restore`, `kith versions` (ADR-0002 §4) | History is v0.3 and must be designed with Role honesty | v0.3 |
-| `kith circle adopt-steward` (ADR-0002 §3 succession) | Members module ships without role editing or removal | v0.2 |
+| `kith circle adopt-steward` (ADR-0002 §3 succession — a surviving Member becomes the Steward, and their Device the Circle's introducer) | Members module ships without role editing or removal | v0.2 |
 | Conflict resolution UI | ADR-0002's resolve affordance needs the Health screen | v0.2 |
 | `kith status --watch`, `kith logs` | The TUI is the live view; nothing writes a log a Person is not shown | v0.2 |
 | Per-ticket Invite correlation at admit time | The pending-device record cannot carry the nonce (§4.5) | v0.2 |

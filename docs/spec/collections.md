@@ -71,7 +71,7 @@ Per ADR-0004 §2, and unchanged by this spec:
 ├── .kith/
 │   ├── circle.toml
 │   ├── collections/main.toml           # the Collection descriptor
-│   ├── members/<device-id>.toml        # attribution roster (ADR-0004 §5)
+│   ├── members/<device-id>.toml        # Membership claims, one per Device (ADR-0004 §5)
 │   ├── items/main/<device-id>.jsonl    # ← the Collection's record logs, one per Device
 │   └── local/incoming/                 # import staging; never syncs
 └── .stversions/
@@ -161,7 +161,7 @@ Never scanned, never hashed, never a tile:
 | Excluded | Source |
 |---|---|
 | `.kith/**` | ADR-0004 §2 |
-| everything `SyncEngine::reserved_paths()` returns — `.stfolder`, `.stversions/**`, `.stignore`, `.stglobalignore`, `.syncthing.*.tmp`, `~syncthing~*.tmp`, `*.sync-conflict-*` | ADR-0004 §2 |
+| everything `SyncEngine::reserved_paths()` returns — `.stfolder`, `.stversions/**`, `.stignore`, `.stglobalignore`, `.syncthing.*.tmp`, `~syncthing~*.tmp`, `*.sync-conflict-*` | ADR-0002 §1 (the method), ADR-0004 §2 (the set) |
 | any other dot-entry at any depth | this spec — matches `kith add`'s skip rule (cli-tui §4.6) |
 | symlinks | this spec (§9) |
 | anything the Provider does not `claim` | ADR-0003 §1 |
@@ -449,19 +449,20 @@ Ben may both run `kith create --adopt` on Tuesday and there is no coordinator to
 descriptors; every other Device adopts into the descriptors that arrive.**
 
 wp-sync installs have exactly one introducer by construction — the script's introducer mode
-issues the code, friend mode flags that one peer. That is the only steward signal that exists
-before any kith metadata does, and it is already visible above the seam: `kith list members`
-prints `"introducer": true` per Member (cli-tui §3.2).
+issues the code, friend mode flags that one peer. That is the only signal of who the Steward is
+— the Member whose Device the transport flags as introducer — that exists before any kith
+metadata does, and it is already visible above the seam: `kith list members` prints
+`"introducer": true` per Member (cli-tui §3.2).
 
-> *Call recorded here:* this spec relies on `PeerDevice.introducer: bool` — one field added to
-> ADR-0002 §1's `PeerDevice`, no new method, no new endpoint (the folder's device list already
-> carries the flag). The seam budget (ROADMAP rule 2) is charged one field, and the CLI surface
-> already assumed it.
+> *Seam reference:* this spec relies on `PeerDevice.introducer: bool`, which ADR-0002 §1's
+> `PeerDevice` carries — one field, no new method, no new endpoint (the folder's device list
+> already carries the flag). The seam budget (ROADMAP rule 2) is charged one field, and the CLI
+> surface already assumed it.
 
 | This Device | Adoption writes |
 |---|---|
-| No peer in the Circle is flagged introducer → **this Device is the introducer** | `circle.toml` (`founder_*` = this Person/Device, `adopted = true`), `collections/main.toml`, its own member claim, then §4.4 |
-| Exactly one peer is flagged introducer → **this Device is a Member** | its own member claim, then §4.4. No descriptors. |
+| No peer in the Circle is flagged introducer → **this Device is the introducer** | `circle.toml` (`founder_*` = this Person/Device, `adopted = true`), `collections/main.toml`, its own Membership claim, then §4.4 |
+| Exactly one peer is flagged introducer → **this Device is a Member** | its own Membership claim, then §4.4. No descriptors. |
 | A descriptor already exists in the tree | nothing — read it and proceed to §4.4, on either Device |
 
 A Member that adopts before the introducer has upgraded gets a working Collection immediately —
@@ -680,7 +681,7 @@ Every field is derived from this Device's tree and cache. Nothing here is a netw
 | Does Ben have this Item? | **kith cannot say.** The engine reports per-peer *completion of the whole synced space* as a percentage and a byte count, as of the last connection (ADR-0002 §1, `CircleStatus.peers`). That is folder-wide and byte-shaped; it cannot answer a per-Item question, and v0.1 does not ask one. `kith status` shows `Ben online (91%)` and stops there. |
 | How much disk does Ben use? | **kith cannot say**, and there is nowhere to learn it from. |
 | Did a Member add and then remove something while I was away? | **Yes, and reliably** — both records live in the same append-only log, so a Device offline for a year receives the `add` and the `remove` together and reduces to the correct tombstone. This is a genuine property of the log design, not a hope. |
-| Was something added and removed by a Member who has since left? | Yes; member claims are never deleted (ADR-0004 §5), so the attribution still resolves to a named Person. |
+| Was something added and removed by a Member who has since left? | Yes; Membership claims are never deleted (ADR-0004 §5), so the attribution still resolves to a named Person. |
 | Why does `bytes_declared − bytes_here` disagree with `kith status`'s "MB to receive"? | Because they measure different things: the first is Item bytes this Device lacks, the second is everything the engine still owes for the whole synced space, `.kith/` and conflict copies included. Both are printed; neither is adjusted to match the other. |
 
 The rule behind the table: **a count kith prints is a count of what this Device holds, and it
@@ -760,7 +761,7 @@ The full CLI contract is `docs/spec/cli-tui.md`. What Collections owns:
 | `kith status` | `items` comes from `CollectionStats.items`; the per-peer line stays byte-shaped and stale-labelled (§7). |
 | `kith doctor` | Contributes to `circle.<id>.sync` and adds the counts §7 names: unclaimed files, duplicate byte copies, tombstoned-with-bytes, byteless Items, symlinks, and `circle.descriptor`. Each is a `warn` at most — none of them is a broken Circle. |
 | Gallery (#15) | Consumes `CollectionView` only. Three tile states originate here: **normal**, **placeholder** (record, no bytes), **arriving** (bytes, no record, inside the settle window). Empty-state copy is cli-tui §6.5's. |
-| Preview (#15) | Fact line fields come from the record: title, `by` resolved through the roster, `added_at`, `facts.width×height`, `size`. An `adopted` Item reads *found by Ana*, never *added by Ana*. |
+| Preview (#15) | Fact line fields come from the record: title, `by` resolved to a Person through the Membership claims, `added_at`, `facts.width×height`, `size`. An `adopted` Item reads *found by Ana*, never *added by Ana*. |
 | Delete Action (#15) | Calls `remove` with §5.2's confirmation text. |
 | Live refresh | `Change::ItemsChanged` → `reconcile(Some(paths))` → the Gallery repaints. `kith add` running in another terminal therefore appears in an open TUI without either process knowing about the other; the tree is the channel. |
 

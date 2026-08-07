@@ -20,9 +20,9 @@ It owns four things and nothing else:
 2. **Binding this Device** to that Person, where the Device's only real identity is the
    Sync Engine daemon's certificate-derived device identity, which kith reads and never
    owns.
-3. **Publishing and resolving the roster** — the synced records that say which Device
-   speaks for which Person, so a Circle can show People instead of 63-character device
-   IDs.
+3. **Publishing and resolving membership claims** — the synced records that say which
+   Device speaks for which Person, so a Circle can show People instead of 63-character
+   device IDs.
 4. **Telling the truth about trust and loss** — what admission does and does not
    guarantee, when a human is asked, and what "no recovery authority" means in
    sentences a Person can act on.
@@ -41,7 +41,7 @@ v0.1 or ever.**
 | **Person** | Minted by `kith init`. Carries `PersonId` + display name. The attribution key for every Item, every Member row, every Sidecar. |
 | **Device** | One kith installation bound to one Sync Engine daemon. Identified *by* that daemon's device identity — kith mints no second ID space (§4.2). |
 | **Identity** | The daemon's TLS certificate and key. kith never reads, copies, or backs it up (ADR-0002 §2). This module records *that it exists* and which Person claims it. |
-| **Member** | A Person's participation in a Circle. Resolved by folding roster records; the Role attached to it is the circles spec's problem ([#13]). |
+| **Member** | A Person's participation in a Circle. Resolved by folding the Circle's membership claims; the Role attached to it is the circles spec's problem ([#13]). |
 | **Circle** | The scope of trust. Admission is per-Circle; there is no global trust store (§6.1). |
 | **Invite** | The only way a Device becomes trusted. Ticket format and expiry are ADR-0002 §2 and [#13]; this spec covers only the human moment of approval. |
 | **Sidecar** | Records `added_by: PersonId` — never a `DeviceId`. This is the single constraint that makes a second Device in v0.3 a no-migration change (§5.3). |
@@ -54,8 +54,8 @@ v0.1 or ever.**
 | Path | Contents | Authority |
 |---|---|---|
 | `$XDG_DATA_HOME/kith/identity.toml`<br>(`~/.local/share/kith/identity.toml`) | This Device's Identity claim: `PersonId`, display name, bound `DeviceId`, device name | **Local source of truth for who you are.** Not synced, not a secret, not a key. |
-| `<circle root>/.kith/roster/<DEVICE-ID>.toml` | One published roster record per Device per Circle | **Synced source of truth for who the Circle's Members are.** Single-writer: only the named Device ever writes its own file. |
-| `$XDG_CACHE_HOME/kith/cache.sqlite` | Resolved roster, for startup without re-reading every record | Rebuildable cache (ADR-0001 authority rule). Deleting it costs a re-read, never data. |
+| `<circle root>/.kith/members/<DEVICE-ID>.toml` | One published **Membership claim** per Device per Circle (ADR-0004 §5) | **Synced source of truth for who the Circle's Members are.** Single-writer: only the named Device ever writes its own file. |
+| `$XDG_CACHE_HOME/kith/cache.sqlite` | Resolved roster, for startup without re-reading every claim | Rebuildable cache (ADR-0001 authority rule). Deleting it costs a re-read, never data. |
 | `<circle root>/.kith/local/` | Atomic-write staging (§4.4). Ignored from sync by ADR-0002's `.stignore` seed | Per-Device scratch. |
 | daemon config dir (`~/.local/state/syncthing/`, v1: `~/.config/syncthing/`) | The certificate and key that *are* the Identity | Owned by the daemon. kith reads `config.xml` for credentials only (ADR-0002 §6) and never touches `cert.pem`/`key.pem`. |
 
@@ -88,13 +88,13 @@ bound_at = "2026-08-07T14:02:11Z"
 ```
 
 Written with mode `0600` — not because it is secret (it is not), but because a stray
-world-readable copy is the one thing that lets another local account publish records in
+world-readable copy is the one thing that lets another local account publish claims in
 your name (§7.2). Timestamps are RFC 3339, UTC, second precision, everywhere in this
 spec.
 
-### 3.2 The roster record
+### 3.2 The Membership claim
 
-`<circle root>/.kith/roster/P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2.toml`
+`<circle root>/.kith/members/P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2.toml`
 
 ```toml
 schema       = 1
@@ -106,20 +106,23 @@ joined       = "2026-08-07T14:03:02Z"
 updated      = "2026-08-07T14:03:02Z"
 ```
 
-Four rules make this format conflict-tolerant without a coordinator, which is the
-property ADR-0004 must preserve when it fixes the encoding for Sidecars:
+Four rules make this format conflict-tolerant without a coordinator. ADR-0004 has since
+settled that property for the whole of `.kith/`: its §1 raises the second rule below into
+**W1** — every synced file names its writing Device in its path, and only that Device
+ever writes it — and its §5 fixes this claim's directory and encoding. The rules below
+are W1 seen from this module:
 
 | Rule | Why |
 |---|---|
-| **The filename is the key.** A record whose `device` field ≠ its filename is ignored and reported. | Removes the only ambiguity a merge would have to resolve. |
+| **The filename is the key.** A claim whose `device` field ≠ its filename is ignored and reported. | Removes the only ambiguity a merge would have to resolve. |
 | **One writer per file** — a Device writes `<its own id>.toml` and no other. | Two Devices never race on one path, so `*.sync-conflict-*` copies do not occur in normal operation. When one appears anyway (§7.4) it is evidence, not a merge problem. |
 | **Whole-file replace, last write wins.** No field-level merging, ever. | The only writer is the Device itself; its latest statement about itself is definitionally current. |
-| **Unknown keys are ignored on read; a `schema` above the known major is read best-effort and never rewritten.** | An older kith beside a newer one degrades to "I can see Ben, I can't see his new field" instead of corrupting the record. |
+| **Unknown keys are ignored on read; a `schema` above the known major is read best-effort and never rewritten.** | An older kith beside a newer one degrades to "I can see Ben, I can't see his new field" instead of corrupting the claim. |
 
-A Device in three Circles publishes three records — the roster lives in the Circle's
-tree, not in a global place, because there is no global place. v0.1 publishes the same
-`display_name` to every Circle from `identity.toml`; per-Circle names are representable
-and unimplemented.
+A Device in three Circles publishes three claims — a Circle's membership claims live in
+its own tree, not in a global place, because there is no global place. v0.1 publishes
+the same `display_name` to every Circle from `identity.toml`; per-Circle names are
+representable and unimplemented.
 
 ---
 
@@ -153,7 +156,7 @@ kith refuses to invent a placeholder it would later have to reconcile.
 8. Print the identity and the loss warning (§4.2 transcript), then the next verb.
 
 `kith init` writes **nothing** into any Circle and touches **nothing** in the daemon's
-config. It is purely local. Roster publication happens when a Circle exists (§4.4).
+config. It is purely local. A Membership claim is published when a Circle exists (§4.4).
 
 **Transcript — interactive:**
 
@@ -204,7 +207,7 @@ Consequences, all deliberate:
 - **A Device is a daemon, not a login.** Two OS accounts sharing one system-wide daemon
   are one Device to kith, and §7.2 is what happens then.
 - kith never writes the daemon's own `name` field. The Device name in this spec is a
-  kith-level fact carried in the roster record, honouring ADR-0002 §6's list of things
+  kith-level fact carried in the Membership claim, honouring ADR-0002 §6's list of things
   kith does not mutate.
 
 **Short forms**, used in every surface where the full ID would not fit: Device
@@ -228,13 +231,13 @@ common case stays clean. Two *Devices* of one Person disambiguate by `device_nam
 
 **Resolution order** for the name shown against a peer Device:
 
-1. Its roster record's `display_name` — the Person's own claim.
+1. The `display_name` in its Membership claim — what the Person says their name is.
 2. The engine's device name for that peer (`PeerDevice.name`, learned by introduction),
-   rendered in quotes and dimmed: `"bens-laptop" · no kith record yet`.
+   rendered in quotes and dimmed: `"bens-laptop" · no kith claim yet`.
 3. The short device ID.
 
-Rung 2 exists for the window between admission and the roster record arriving, and it is
-visibly distinguished because it is a name the *engine* carries, not one the Person
+Rung 2 exists for the window between admission and the Membership claim arriving, and it
+is visibly distinguished because it is a name the *engine* carries, not one the Person
 published.
 
 ### 4.4 The reconciler — publishing this Device into a Circle
@@ -259,46 +262,46 @@ pub struct LocalIdentity { pub person: Person, pub device: DeviceRecord }
 pub struct Person       { pub id: PersonId, pub display_name: String, pub created: OffsetDateTime }
 pub struct DeviceRecord { pub id: DeviceId, pub name: String, pub bound_at: OffsetDateTime }
 
-/// Loads identity.toml, checks the binding, publishes roster records where needed.
+/// Loads identity.toml, checks the binding, publishes Membership claims where needed.
 /// Never blocks on the network beyond one `local_device()` with the engine's normal timeout.
 pub async fn reconcile(
     engine: &impl SyncEngine,
     circles: &[CircleRef],
     store: &IdentityStore,
-) -> Result<(IdentityState, Vec<RosterProblem>), IdentityError>;
+) -> Result<(IdentityState, Vec<ClaimProblem>), IdentityError>;
 ```
 
 Publication, per Circle root, is a three-branch decision — and the third branch is the
 whole reason the reconciler is a named thing rather than an inline write:
 
-| Existing `.kith/roster/<me>.toml` | Action |
+| Existing `.kith/members/<me>.toml` | Action |
 |---|---|
 | absent | Write it. This is the first write a joining Device makes into a Circle, immediately after `complete_join`. |
 | present, `person` == ours, fields equal | Do nothing. The common path costs one read. |
 | present, `person` == ours, fields differ | Rewrite with `updated` bumped. |
-| present, `person` != ours | **Stop. Never write.** Emit `RosterProblem::PersonContradiction` and report it. |
+| present, `person` != ours | **Stop. Never write.** Emit `ClaimProblem::PersonContradiction` and report it. |
 
 That last branch is not defensive coding, it is the fix for §7.2: two Persons behind one
-Device ID would otherwise rewrite each other's record on every start, forever, and
+Device ID would otherwise rewrite each other's claim on every start, forever, and
 replicate the flapping to the whole Circle. kith would rather show a Circle a problem
 than generate churn in it.
 
 **Atomic write across a synced tree.** Writing `foo.tmp` then renaming inside
-`.kith/roster/` would replicate the temp file to every Member. Instead the record is
-written to `<circle root>/.kith/local/roster-<device>.tmp`, `fsync`ed, and `rename(2)`d
-into `.kith/roster/` — same filesystem, and `.kith/local` is already ignored from sync by
+`.kith/members/` would replicate the temp file to every Member. Instead the claim is
+written to `<circle root>/.kith/local/member-<device>.tmp`, `fsync`ed, and `rename(2)`d
+into `.kith/members/` — same filesystem, and `.kith/local` is already ignored from sync by
 ADR-0002's `.stignore` seed. Members see one atomic appearance, never a partial file.
 
-### 4.5 Reading the roster — People from Devices
+### 4.5 Reading the membership claims — People from Devices
 
 ```rust
-pub struct RosterRecord {
+pub struct MembershipClaim {
     pub device: DeviceId, pub device_name: String,
     pub person: PersonId, pub display_name: String,
     pub joined: OffsetDateTime, pub updated: OffsetDateTime,
 }
 
-pub enum RosterProblem {
+pub enum ClaimProblem {
     FilenameMismatch    { path: PathBuf, claimed: DeviceId },
     ConflictCopy        { path: PathBuf },                     // §7.4
     PersonContradiction { device: DeviceId, ours: PersonId, theirs: PersonId },
@@ -313,23 +316,24 @@ pub struct PersonView {
     pub online: bool,               // any Device connected
 }
 
+/// The Circle's membership claims, folded. The set — never one claim.
 impl Roster {
-    pub fn load(circle_root: &Path) -> (Roster, Vec<RosterProblem>);
+    pub fn load(circle_root: &Path) -> (Roster, Vec<ClaimProblem>);
     pub fn person_of(&self, device: &DeviceId) -> Option<&PersonId>;
-    /// Fold records by PersonId, join against engine presence, sort by display name.
+    /// Fold claims by PersonId, join against engine presence, sort by display name.
     pub fn people(&self, peers: &[PeerDevice], me: &LocalIdentity) -> Vec<PersonView>;
 }
 ```
 
 `people()` is the Person/Device split in one function: it groups by `PersonId` and folds
 presence with OR across a Person's Devices. It is written for N Devices in v0.1 and
-exercised with 1. `load` never fails — an unreadable record becomes a `RosterProblem` and
+exercised with 1. `load` never fails — an unreadable claim becomes a `ClaimProblem` and
 the rest of the Circle still resolves, because one bad file must not blank a Members
 screen.
 
-**Devices with no record.** A peer the engine reports but the roster does not describe is
+**Devices with no claim.** A peer the engine reports but no Membership claim describes is
 shown as an *unidentified Device* — rung 2 or 3 of §4.3 — never hidden. It is either a
-Member whose record has not arrived yet or a Device someone admitted outside kith; both
+Member whose claim has not arrived yet or a Device someone admitted outside kith; both
 are things a Person should be able to see.
 
 ### 4.6 Re-running `kith init`
@@ -362,8 +366,8 @@ therefore entirely a file-format question above the seam:
 |---|---|
 | Does this key belong to this machine? | The daemon. Cryptographic, real. |
 | May this Device be in this Circle? | The introducer's `admit()` call. Enforceable, because it runs on the gatekeeper's own hardware (ADR-0002 §4). |
-| Which Person does this Device speak for? | `person` in the Device's own roster record. **A claim.** |
-| Which Devices are one Person? | A fold over roster records (`Roster::people`). |
+| Which Person does this Device speak for? | `person` in the Device's own Membership claim. **Asserted, never proven — which is why the record is called a claim.** |
+| Which Devices are one Person? | A fold over the Circle's membership claims (`Roster::people`). |
 
 The trust chain has exactly one cryptographic link and it is the first one. Everything
 after is a human having said yes to a device ID, plus that Device's self-description.
@@ -375,7 +379,7 @@ Every surface that shows a name is showing rung 4, and §8.3 makes the UI say so
 |---|---|
 | Person/Device as distinct types, distinct IDs | **Yes** |
 | `Sidecar.added_by` is a `PersonId` | **Yes** |
-| Roster keyed by Device, folded to People | **Yes** |
+| Membership claims keyed by Device, folded to People | **Yes** |
 | Reading N Devices per Person — grouping, presence-OR, per-Device rows | **Yes.** A Circle that already contains two Devices claiming one `PersonId` — a Member running a later kith — renders correctly as one Person with two Devices, on a v0.1 client, with no update. |
 | Writing a second Device for an existing Person | **No.** There is no verb, no prompt, no file path that produces one. `kith init` on a machine with no `identity.toml` always mints a *new* Person. |
 | Enrolment: getting an existing `PersonId` onto a new Device | **No.** This is the entire missing piece (§5.3). |
@@ -389,19 +393,19 @@ Nothing changes on disk when v0.3 arrives:
 
 - `identity.toml` already stores a `PersonId` independent of the `DeviceId`, so a second
   Device holds the same Person without any field being repurposed.
-- Roster records are already per-Device with a `person` field; two records naming one
+- Membership claims are already per-Device with a `person` field; two claims naming one
   Person is a case the format already expresses and `people()` already folds.
 - Sidecars already attribute to `PersonId`, so every Item written in v0.1 attributes
   correctly forever. **This is the load-bearing constraint** — a Sidecar that attributed
   to a `DeviceId` would make the second Device a data migration across every Member's
   disk, which is exactly the migration ROADMAP forbids.
 - The seam is untouched: `admit()` already admits a device ID; a Person's second Device
-  is simply a second admission. No new `SyncEngine` method, so ADR-0002's 16-method
-  budget survives v0.3.
+  is simply a second admission. No new `SyncEngine` method, so ADR-0002's seam — 17
+  methods, counting the `reserved_paths` that ADR-0004 §2 added — survives v0.3 unchanged.
 
 What v0.3 must build is only the enrolment moment, and the honest sketch is: Device A
 prints its `PersonId` plus a short nonce; Device B takes it at `init`; B then knocks at
-each Circle and is admitted like any Device, publishing a record naming the same Person.
+each Circle and is admitted like any Device, publishing a claim naming the same Person.
 The nonce guards against typos, not forgery — ROADMAP forbids home-grown cryptography,
 and kith cannot sign with a key the daemon owns. A second Device is believed for the same
 reason a first one is: a human approved it.
@@ -419,7 +423,7 @@ admitting Device, via `SyncEngine::admit`. That is the entire trust primitive.
 |---|---|
 | Let it connect and exchange the Circle's bytes | Grant a Role — Roles are policy (ADR-0002 §4) |
 | Let it write anything into the Circle, including other People's Items | Verify that its display name is that human's name |
-| Let it publish a roster record claiming any Person | Bind it to a Person in any enforceable way |
+| Let it publish a Membership claim naming any Person | Bind it to a Person in any enforceable way |
 | Propagate, when done by the introducer, to every Member (ADR-0002 §3) | Extend to any other Circle |
 
 **Trust is per-Circle. There is no global trust store, no per-Person allow-list, no
@@ -435,17 +439,18 @@ Four moments, and — importantly — one non-moment.
 
 | # | Trigger | Who is asked | What they see | Outcome |
 |---|---|---|---|---|
-| 1 | `kith create` | nobody | — | You founded it; you are its steward and sole introducer. |
-| 2 | `Change::JoinRequested` — a Device consumed your Invite and is knocking | the **steward**, on the Device that issued the Invite | claimed device name, short + full device ID, first-seen time, which Invite it matched and when that Invite expires | `admit()` or dismiss |
+| 1 | `kith create` | nobody | — | You founded it; you are its **Steward** — the Member whose Device is the Circle's sole introducer. |
+| 2 | `Change::JoinRequested` — a Device consumed your Invite and is knocking | the **Steward**, on the Device that issued the Invite | claimed device name, short + full device ID, first-seen time, which Invite it matched and when that Invite expires | `admit()` or dismiss |
 | 3 | `Change::CircleOffered` — the Circle is offered back after your join | the **joiner** | Circle name, offering Device, proposed local path | `complete_join(offer, root)` or dismiss |
 | 4 | Startup finds `IdentityState::Mismatched` | this Device's Person | old and new device IDs | rebind or quit (§7.3) |
-| — | **The steward admits somebody new to a Circle you are in** | **nobody** | Members gains a row | No prompt, ever. |
+| — | **The Steward admits somebody new to a Circle you are in** | **nobody** | Members gains a row | No prompt, ever. |
 
 That last row is a decision, not an omission. Being in a Circle *is* delegating admission
-to its steward — that is what an introducer is, and pretending otherwise by prompting
-would offer a veto that does not exist: the Device is already in your config by the time
-you could answer, propagated automatically (ADR-0002 §3). kith shows the arrival in
-Members and tells the truth about the recourse, which is leaving the Circle.
+to its Steward — that is what carrying the Steward's Device as your introducer means, and
+pretending otherwise by prompting would offer a veto that does not exist: the Device is
+already in your config by the time you could answer, propagated automatically
+(ADR-0002 §3). kith shows the arrival in Members and tells the truth about the recourse,
+which is leaving the Circle.
 
 ### 6.3 The approval prompt
 
@@ -495,11 +500,11 @@ kept:
 | Kept | Result |
 |---|---|
 | `identity.toml` only | Same Person, new Device. `kith init` rebinds (§4.6). Past Items stay attributed to you, your name persists. **Every Circle must admit the new Device by a fresh Invite**, exactly like a stranger — because it is one, cryptographically. |
-| daemon config only | Same Device ID, no Person. `kith init` mints a **new** Person. Old Items keep the old `PersonId`, which now resolves to nobody and renders as *unknown Person (p-7f3k9x)*. Worse: the Circle already holds a roster record for this Device ID naming the old Person, so the reconciler hits the contradiction branch (§4.4) and refuses to publish. `kith doctor` names the cause and the fix — delete the stale record, which this Device is the rightful writer of, or restore `identity.toml`. |
+| daemon config only | Same Device ID, no Person. `kith init` mints a **new** Person. Old Items keep the old `PersonId`, which now resolves to nobody and renders as *unknown Person (p-7f3k9x)*. Worse: the Circle already holds a Membership claim for this Device ID naming the old Person, so the reconciler hits the contradiction branch (§4.4) and refuses to publish. `kith doctor` names the cause and the fix — delete the stale claim, which this Device is the rightful writer of, or restore `identity.toml`. |
 | both | Nothing happened. |
 | neither | §7.5. |
 
-**If the re-installed Device was the Circle's steward**, v0.1's answer is blunt: the
+**If the re-installed Device was the Steward's Device**, v0.1's answer is blunt: the
 Circle keeps syncing — data flows mesh, every Member holds every byte — but no new Member
 can join and no removal propagates, because the introducer is gone and v0.1 ships no
 succession verb (ADR-0002 §3 designs one; the v0.1 CLI surface does not include it).
@@ -510,7 +515,7 @@ succession verb (ADR-0002 §3 designs one; the v0.1 CLI surface does not include
 | Arrangement | Works? |
 |---|---|
 | Two OS accounts, each running its own user-session daemon (the distro default: `syncthing.service` as a user unit) | **Yes, fully.** Separate XDG dirs, separate daemons, separate device IDs, separate Identities. Nothing special is needed and nothing is shared. |
-| Two OS accounts sharing one system-wide daemon | **No.** One daemon means one Device ID means one Device. Both Identities bind to the same ID; whichever runs first publishes its roster record, and the second hits §4.4's contradiction branch and **refuses to write** — no flapping record, no churn replicated to the Circle. `kith doctor` reports it as *shared Sync Engine daemon* and prescribes a per-account daemon, or `[sync_engine] address` pointing kith at a different one. |
+| Two OS accounts sharing one system-wide daemon | **No.** One daemon means one Device ID means one Device. Both Identities bind to the same ID; whichever runs first publishes its Membership claim, and the second hits §4.4's contradiction branch and **refuses to write** — no flapping claim, no churn replicated to the Circle. `kith doctor` reports it as *shared Sync Engine daemon* and prescribes a per-account daemon, or `[sync_engine] address` pointing kith at a different one. |
 | One OS account, two humans | **Not supported.** One Identity per account per daemon. The workaround is separate OS accounts, and the docs say so plainly rather than inventing a profile switcher. |
 
 The rule underneath all three: **a Device is a daemon, not a login, not a machine.**
@@ -541,13 +546,13 @@ What still works, because kith is a gallery before it is a sync client: browsing
 preview, Apply, Favourites, `list`, `status`, `doctor`. Exit code for a blocked verb is
 **78**, and the message is one line plus the fix: `kith init` to rebind.
 
-### 7.4 A roster record has a conflict copy
+### 7.4 A Membership claim has a conflict copy
 
-`.kith/roster/<DEVICE>.sync-conflict-20260807-143122-P56IOI7.toml` cannot happen
+`.kith/members/<DEVICE>.sync-conflict-20260807-143122-P56IOI7.toml` cannot happen
 under the single-writer rule, so its existence is information: two Devices wrote one
-record (§7.2's shared daemon), or a Member restored an old tree over a live one, or
+claim (§7.2's shared daemon), or a Member restored an old tree over a live one, or
 something is impersonating. kith **never merges** it. It is filtered out of the Members
-screen, reported by `kith doctor` with both records' `person` and `updated` values side
+screen, reported by `kith doctor` with both claims' `person` and `updated` values side
 by side, and left on disk for a human. This is the same posture ADR-0002 §2 takes toward
 conflict copies in the gallery: handled, never hidden.
 
@@ -558,12 +563,12 @@ There is no recovery authority because there is no authority. Concretely:
 | Question | Answer |
 |---|---|
 | Can kith restore my Identity? | No. The key is the daemon's; kith never copied it and has nowhere to copy it to. |
-| Can my friends restore it? | No. They hold your *content* and a record saying "device X is Ana". Neither reconstructs the key. |
+| Can my friends restore it? | No. They hold your *content* and a claim saying "device X is Ana". Neither reconstructs the key. |
 | Is my content gone? | **No.** Every Item you added lives on every Member's disk. That is the whole point of peer-to-peer. |
 | Does my name stay on it? | Yes. Sidecars attribute to `PersonId`, which is a fact in the synced tree, not a lookup against you. |
 | Can I come back? | As a new Person, always — `kith init`, fresh Invite. As the *same* Person, only if you kept `identity.toml`, and even then every Circle must admit your new Device. |
 | Is `identity.toml` a backup of my Identity? | **No, and this matters.** It backs up your *name and attribution*, not your ability to prove anything. Anyone who copies it can claim the same name. It is a convenience; the Device is the Identity. |
-| What if I was the steward? | The Circle survives and keeps syncing; it can admit nobody new (§7.1). |
+| What if I was the Steward? | The Circle survives and keeps syncing; it can admit nobody new (§7.1). |
 
 ### 7.6 Smaller sharp edges
 
@@ -573,7 +578,7 @@ There is no recovery authority because there is no authority. Concretely:
 | `schema` newer than this kith | Read best-effort, refuse to write, `doctor` says upgrade. |
 | Clock skew across Devices | `joined`/`updated` are display facts only. Nothing orders, resolves, or expires on them. Invite expiry is checked by the admitting Device against its own clock (ADR-0002 §2) — never against a peer's timestamp. |
 | Two People pick the same display name | Both shown with `(p-xxxxxx)` suffixes (§4.3). Not an error; there is no registry. |
-| A Device publishes a record naming a `PersonId` that also belongs to a different Device | In v0.1 this is exactly the v0.3 shape, so it renders as one Person with two Devices. `doctor` notes it as unexpected for v0.1 rather than treating it as corruption. |
+| A Device publishes a claim naming a `PersonId` that also belongs to a different Device | In v0.1 this is exactly the v0.3 shape, so it renders as one Person with two Devices. `doctor` notes it as unexpected for v0.1 rather than treating it as corruption. |
 | `$XDG_DATA_HOME` on a network filesystem that loses the file | Same as §7.5's "identity.toml lost". Nothing here is precious except the daemon's key, which is not ours. |
 
 ---
@@ -593,8 +598,8 @@ section fixes only what identity contributes, within ROADMAP's v0.1 verb list:
 | `doctor` | no | no | Reports identity fully in every state, including `Absent`. The verb you can always run. |
 | `status` | no | no | Prints an Identity block; `Identity: none — run kith init` when absent, exit 0. Diagnostics do not fail on the thing they diagnose. |
 | `init` | creates it | **yes** | §4.1, §4.6 |
-| `create` | yes | yes | Publishes this Device's roster record into the new Circle as its first write, right after `create_circle`. |
-| `join` | yes | yes | On `complete_join`, publishes the roster record before anything else — a Member should be nameable the instant they appear. |
+| `create` | yes | yes | Publishes this Device's Membership claim into the new Circle as its first write, right after `create_circle`. |
+| `join` | yes | yes | On `complete_join`, publishes its Membership claim before anything else — a Member should be nameable the instant they appear. |
 | `invite` | yes | yes | Ticket carries this Device's ID as introducer (ADR-0002 §2). |
 | `approve` / `reject` | yes | yes | §6.3. |
 | `add` | yes | no | Stamps `added_by = <PersonId>` into each Sidecar. Blocked when `Mismatched` (§7.3). |
@@ -616,10 +621,10 @@ Sync Engine unavailable where required, **78** no Identity / Identity mismatch.
 
 ### 8.2 `kith approve` / `kith reject`
 
-Pending joins are shown only on the Circle's steward Device. A non-steward Member whose
-daemon sees a knock gets a `doctor` line explaining that the steward approves — v0.1 does
-not offer the pairwise admission the transport technically permits, because a
-partially-connected Circle is harder to explain than a frozen one.
+Pending joins are shown only on the Steward's Device. Any other Member whose daemon sees
+a knock gets a `doctor` line explaining that the Steward approves — v0.1 does not offer
+the pairwise admission the transport technically permits, because a partially-connected
+Circle is harder to explain than a frozen one.
 
 ```
 $ kith approve
@@ -656,9 +661,9 @@ Circles      walls (3 Members, 2 online) · synced
 | Sync Engine reachable, credentials found | the address and every config path probed (ADR-0002 §6) |
 | stored `DeviceId` == `local_device()` | both IDs, what is blocked, and `kith init` |
 | shared-daemon collision (§7.2) | the other `PersonId` and the per-account-daemon fix |
-| roster record published, current, in every Circle | which Circles are missing it |
-| roster problems: filename mismatch, conflict copy, contradiction | file paths, unmerged |
-| stewardship: is this Circle's steward reachable | that joins are frozen while it is not (§7.1) |
+| Membership claim published, current, in every Circle | which Circles are missing it |
+| claim problems: filename mismatch, conflict copy, contradiction | file paths, unmerged |
+| stewardship: is the Steward's Device reachable | that joins are frozen while it is not (§7.1) |
 | legacy `~/.config/wp-sync/identity` found | that it is a credentials file, not an Identity |
 
 `doctor` exits 1 if any check fails, 0 otherwise, and prints every check either way —
@@ -717,7 +722,7 @@ Named cuts, each with where it returns if it returns:
 |---|---|
 | **Enrolling a second Device for one Person** | The read path exists (§5.2); the enrolment moment does not. v0.3, no migration (§5.3). |
 | **Renaming a Person or Device** | ROADMAP §2 says no rename. The hand-edit consequence is documented in §4.6 and advertised nowhere. |
-| **Avatars** | ROADMAP §2. Nothing in the record format precludes a later `avatar` key; unknown keys are already ignored on read (§3.2). |
+| **Avatars** | ROADMAP §2. Nothing in the claim format precludes a later `avatar` key; unknown keys are already ignored on read (§3.2). |
 | **Device grouping as a UI** | The grouping *function* ships (`Roster::people`); a screen for managing it does not. |
 | **Removing a Member / revoking a Device** | `expel` exists on the seam; the verb is v0.2 (ROADMAP §4). |
 | **Introducer succession** | Designed in ADR-0002 §3; no verb in v0.1's CLI surface. §7.1 states the consequence honestly instead of hiding it. |
@@ -725,7 +730,7 @@ Named cuts, each with where it returns if it returns:
 | **Signing, verifying, or proving a Person claim** | Requires either home-grown cryptography (ROADMAP §5 forbids it) or reading the daemon's private key (ADR-0002 §2 forbids it). The claim stays a claim, and every surface says so. |
 | **Identity export/import verbs** | `cp identity.toml` is the whole feature, and dressing it as a verb would imply it is a backup of something it is not (§7.5). |
 | **Multiple Identities per OS account; profile switching** | §7.2. Separate OS accounts. |
-| **Per-Circle display names** | Representable in the record format, unimplemented on purpose. |
+| **Per-Circle display names** | Representable in the claim format, unimplemented on purpose. |
 
 [#13]: https://github.com/opx0/wp-sync/issues/13
 [#16]: https://github.com/opx0/wp-sync/issues/16

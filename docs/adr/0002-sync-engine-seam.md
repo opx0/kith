@@ -4,6 +4,9 @@
 - **Date:** 2026-08-06
 - **Resolves:** [#7 ADR: sync-engine seam & Syncthing mapping](https://github.com/opx0/wp-sync/issues/7)
 - **Informed by:** `research/syncthing-api`, ADR-0001
+- **Amended:** 2026-08-07 — §1 gains `SyncEngine::reserved_paths()` (asked for by ADR-0004
+  §2) and an `introducer` flag on `PeerDevice` (asked for by `docs/spec/collections.md`).
+  The seam is **17 methods**. Both amendments are marked in place below.
 
 ## Context
 
@@ -47,6 +50,10 @@ pub trait SyncEngine: Send + Sync + 'static {
     async fn health(&self) -> Result<EngineHealth, SyncError>;
     /// This Device's engine identity (Syncthing: /rest/system/status .myID).
     async fn local_device(&self) -> Result<DeviceId, SyncError>;
+    /// Globs the engine owns inside a Circle root — its own bookkeeping, its temp
+    /// files and its conflict copies. Not async: a constant of the implementation.
+    /// (Amendment 2026-08-07, ADR-0004 §2.)
+    fn reserved_paths(&self) -> &[&'static str];
 
     // ── circle lifecycle ─────────────────────────────────────────────
     /// Create a Circle: allocate its replicated space, become its introducer.
@@ -86,10 +93,21 @@ pub trait SyncEngine: Send + Sync + 'static {
 }
 ```
 
+`reserved_paths` is the only method that returns names instead of doing work, and it
+exists so that engine artefact *names* never climb above the seam. `.stfolder`,
+`.stversions/**`, `.stignore`, the daemon's temp-file patterns and the conflict-copy
+pattern are Syncthing spellings; the layers that must skip those paths — the Gallery, the
+Item scanner, the hasher — must never contain one. The implementation answers with its own
+globs and the core only ever asks. `engine::syncthing`'s answer is fixed in ADR-0004 §2.
+
 Supporting types, all defined beside the trait, none Syncthing-shaped: `CircleId` and
 `DeviceId` (opaque strings), `CircleRef { id, name, root }` (root: where the Circle's
 bytes live, so the core reads Items and Sidecars straight off disk), `PeerDevice { device,
-name, connected }`, `CircleStatus { state, items, bytes_needed, peers: Vec<PeerCompletion>
+name, connected, introducer }` (`introducer`: this peer is flagged as this Device's
+introducer — §3's circle-admin story already assumes a caller can tell which Device that
+is, and every surface that names the Circle's introducer reads it from here rather than
+re-deriving it from config; amendment 2026-08-07, `docs/spec/collections.md`),
+`CircleStatus { state, items, bytes_needed, peers: Vec<PeerCompletion>
 }`, `JoinRequest { device, name, seen_at }`, `CircleOffer { circle, from, label }`,
 `InviteTicket` (§2), `Cursor` (opaque replay token; Syncthing: last event id), `Envelope {
 cursor, change }`, `Version { archived_at }`, `EngineHealth { reachable, version }`.
@@ -121,6 +139,7 @@ Every method exists because a domain operation demands it; nothing else made the
 | Recover from destructive edits | `versions`, `restore` |
 | Introducer succession | `set_introducer` |
 | Attribute this Device | `local_device` |
+| Keep engine artefacts out of the Gallery | `reserved_paths` |
 
 Joining is genuinely two-phase and two-sided; the trait exposes that rather than
 pretending it is synchronous. `begin_join` knocks; the offer comes back through `observe`
@@ -132,14 +151,14 @@ controls the path and no global default is touched (§6).
 
 | Domain concept | Syncthing counterpart | Notes |
 |---|---|---|
-| Person | **none — deliberately** | Asserted in synced roster records above the seam (format: ADR-0004). The engine knows only devices. |
+| Person | **none — deliberately** | Asserted in synced Membership claims above the seam (format: ADR-0004 §5). The engine knows only devices. |
 | Device | device (certificate-derived 64-char device ID) | |
 | Identity | the device's TLS certificate + key | Owned by the daemon. kith never reads, copies, or backs it up. |
 | Circle | folder | ID `kith-` + 8 random base32 chars, immutable, never derived from the name. Label = Circle name, mutable. Adopted installs keep their existing ID (§7). |
-| Member | the set of a Person's device IDs present in the folder's `devices` array | The Person↔Device grouping lives in the roster record, not in Syncthing. |
+| Member | the set of a Person's device IDs present in the folder's `devices` array | The Person↔Device grouping lives in the Membership claims — one per Device, each naming its Person — not in Syncthing. |
 | Role | **none** — a policy record in the synced tree | See §4. |
 | Invite | **none** — a kith `InviteTicket` + the pending-device handshake | Ticket: `{circle, circle_name, introducer: DeviceId, address_hints, issued, expires, nonce}`, serialized to a compact paste/QR string, carried out-of-band. Consumption = `begin_join` → introducer sees `JoinRequested` → `admit`. Expiry and revocation are checked by the admitting Device at `admit` time — enforceable, because admission is the one gate that runs on the gatekeeper's own hardware. |
-| Collection | a directory within the folder | v0.1: the sole Collection is the folder root (wp-sync compat). `.kith/` is reserved for Sidecars and roster records; `.kith/local/` is per-Device scratch, ignored from sync. |
+| Collection | a directory within the folder | v0.1: the sole Collection is the folder root (wp-sync compat). `.kith/` is reserved for Sidecars and Membership claims; `.kith/local/` is per-Device scratch, ignored from sync. |
 | Item | a file | `*.sync-conflict-*` copies are filtered from the gallery and surfaced as a resolve affordance — they replicate to everyone, so they must be handled, not hidden. |
 | Sidecar | a file, synced like any other bytes | Conflict-tolerant format is ADR-0004's problem. |
 | Favourite | **never crosses the seam** | Per-Person, private, local. |
@@ -171,15 +190,15 @@ Device therefore administer the whole Circle.
 
 **What it costs.** The introducer is a single point of failure for *membership changes
 only*. Data flows mesh — every Member syncs with every Member directly — so an offline
-introducer stalls nothing but joins, expulsions, and roster propagation to newcomers.
+introducer stalls nothing but joins, expulsions, and membership propagation to newcomers.
 Those queue until it returns.
 
 **Sharp edges, and the rules that blunt them:**
 
 - **Never two introducers, never mutual.** Two Devices introducing each other re-add
   every removed Device forever. kith refuses `set_introducer(_, true)` while the Circle's
-  roster record names a live introducer, and succession always clears the old flag before
-  setting the new one.
+  Membership claims name a live introducer, and succession always clears the old flag
+  before setting the new one.
 - **The flag is device-scoped, not folder-scoped.** If the same two People share two
   Circles, the introducer of one propagates device lists for both mutually shared
   folders. Harmless (propagation is additive and only covers folders both sides already
@@ -188,15 +207,16 @@ Those queue until it returns.
 - **Introduction is one-shot.** Address/name changes after introduction do not propagate;
   discovery handles addressing anyway (`dynamic`).
 
-**Succession.** The roster record in `.kith/` names the current introducer. If that
-Device is retired or lost, a surviving Member runs `kith circle adopt-steward`: their kith
-updates the roster record (synced to everyone), and each Member's kith applies the local
-config change — clear the old flag, set the new — as the record arrives. Devices learned
-via the old introducer are *not* lost: introduced entries persist in each Member's config;
-only future propagation moves to the successor. Honesty requirement: any Member can seize
-succession — the roster record is advisory like every Role (§4). For v0.1 that is
-acceptable; a Circle that cannot trust its Members to not hijack stewardship has a people
-problem no protocol fixes.
+**Succession.** The Membership claims in `.kith/` name the current introducer: the
+`[steward]` table sits in the claim of the Steward's Device (ADR-0004 §5). If that Device
+is retired or lost, a surviving Member runs `kith circle adopt-steward`: their kith writes
+that table into its *own* Membership claim — single-writer, synced to everyone — and each
+Member's kith applies the local config change — clear the old flag, set the new — as the
+claim arrives. Devices learned via the old introducer are *not* lost: introduced entries
+persist in each Member's config; only future propagation moves to the successor. Honesty
+requirement: any Member can seize succession — the claim is advisory like every Role (§4).
+For v0.1 that is acceptable; a Circle that cannot trust its Members to not hijack
+stewardship has a people problem no protocol fixes.
 
 ### 4. Roles are policy; versioning is the enforcement
 
@@ -294,17 +314,17 @@ wrappers' pattern (ADR-0001); the one wrapper that rewrote daemon config aged wo
 
 ### 7. Migration: adopting wp-sync installs
 
-`kith adopt` finds the legacy folder (ID `wallpapers`, or `$WP_FOLDER_ID`) and adopts it
-in place: the existing folder ID, path, and device entries are kept — nothing is
+`kith create --adopt` finds the legacy folder (ID `wallpapers`, or `$WP_FOLDER_ID`) and
+adopts it in place: the existing folder ID, path, and device entries are kept — nothing is
 recreated, no bytes move, peers on old wp-sync keep syncing unmodified. Adoption writes
-the `.kith/` roster record (naming the existing introducer entry as steward), converges
-the folder toward the §2 recipe (adds versioning and the `.stignore` seed — additive
-only), and retires the wp-sync systemd path unit, because auto-apply without consent
-contradicts the consent rule; the Person re-applies deliberately from the gallery. One
-prompted, opt-in cleanup: wp-sync set the global `defaults/device.autoAcceptFolders:
-true`, which silently auto-accepts folders from any future peer; kith offers to clear it,
-explains why, and touches it only on explicit yes — the sole exception to the
-`defaults/*` rule, because wp-sync itself put it there.
+this Device's `.kith/` Membership claim (naming the existing introducer entry as the
+Steward's Device), converges the folder toward the §2 recipe (adds versioning and the
+`.stignore` seed — additive only), and retires the wp-sync systemd path unit, because
+auto-apply without consent contradicts the consent rule; the Person re-applies
+deliberately from the gallery. One prompted, opt-in cleanup: wp-sync set the global
+`defaults/device.autoAcceptFolders: true`, which silently auto-accepts folders from any
+future peer; kith offers to clear it, explains why, and touches it only on explicit yes —
+the sole exception to the `defaults/*` rule, because wp-sync itself put it there.
 
 ## Consequences
 
@@ -321,7 +341,7 @@ explains why, and touches it only on explicit yes — the sole exception to the
   complete a join. Acceptable: joining is an interactive act.
 
 **Gained:**
-- A 16-method firewall, each method pinned to a domain operation. Engine churn — or an
+- A 17-method firewall, each method pinned to a domain operation. Engine churn — or an
   engine swap — lands in one module; `rg -i syncthing` outside `engine::syncthing` and
   `docs/` returning hits is a review failure.
 - Fully event-driven UI: one long-poll loop, no REST polling, gap recovery that degrades
@@ -342,7 +362,7 @@ forbids. ADR-0001 already carries the survivorship evidence.
 
 **Multiple or mutual introducers for redundancy.** Rejected: mutual introduction breaks
 removal permanently (resurrection loop), and "two admins" buys little when succession is
-a one-command roster change. One introducer, explicit succession.
+a one-command Membership-claim change. One introducer, explicit succession.
 
 **`ignoreDelete` as delete protection.** Rejected: per-device, invisible to peers, and
 documented as leaving the cluster permanently inconsistent. Versioning restores state;

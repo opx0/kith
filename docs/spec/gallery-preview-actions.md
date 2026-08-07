@@ -33,7 +33,7 @@ cli-tui.md is cited rather than restated.
 | **Item** | One tile, one Preview. Identified by its ULID (ADR-0004 §4.1) — never by path, so a rename does not move a tile. |
 | **Sidecar** | Every fact on a tile caption and in the Preview fact block: title, who added it, when, resolution, byte size. Derived per ADR-0004 §4.4, never read from a per-Item file. |
 | **Favourite** | The `★` marker, the `F` filter, the `f` key. Local, authoritative, never synced (ADR-0004 §7). |
-| **Person** | Attribution — *added by Ana*, *added by you*, *found by Ana*, *unknown Person*. Resolved through the roster (ADR-0004 §5). |
+| **Person** | Attribution — *added by Ana*, *added by you*, *found by Ana*, *unknown Person*. Resolved through the Membership claims at `.kith/members/<device-id>.toml`, which key on Device and carry the PersonId (ADR-0004 §5). |
 | **Provider** | Produces pixels and declares Actions (ADR-0003 §1). The Gallery calls it; it never calls the Gallery. |
 | **Action** | Five in v0.1: Apply, Favourite, Reveal, Delete, Copy path. |
 | **Apply** | The one Action that changes the world outside kith. §6.6 specifies it; §7 is its consent argument. |
@@ -533,7 +533,7 @@ Row 2 — the fact line, `·`-separated, in this fixed order:
 
 | Field | Source | Rendering |
 |---|---|---|
-| attribution | `ItemView.added_by` through the roster (ADR-0004 §5) | `added by Ana`; this Person → `added by you`; `adopted: true` → **`found by Ana`**, because she did not add it, she was the first to find it on disk; no roster claim → `added by unknown Person (P56IOI7…)`, never blank |
+| attribution | `ItemView.added_by`, resolved to a Person through the Membership claims (ADR-0004 §5) | `added by Ana`; this Person → `added by you`; `adopted: true` → **`found by Ana`**, because she did not add it, she was the first to find it on disk; no Membership claim → `added by unknown Person (P56IOI7…)`, never blank |
 | when | `ItemView.added_at` | `today 09:14`, `yesterday 21:03`, `3 days ago`, then absolute: `3 Aug 2026`. Clock-skewed (§1.3) → `dated 9 Aug 2026 (?)` |
 | resolution | `facts.width × facts.height` | `3840×2160`; facts absent (a record from a newer or foreign writer) → `resolution unknown` |
 | byte size | `ByteBinding.size` | SI: `847 B`, `12 kB`, `1.9 MB`, `12 MB`. One decimal below 10, none above. JSON surfaces carry integers (cli-tui.md §3.2) |
