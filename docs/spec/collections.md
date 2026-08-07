@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-07
 - **Resolves:** [#14 Spec: collections](https://github.com/opx0/wp-sync/issues/14)
-- **Informed by:** ADR-0001 (authority rule), ADR-0002 §§1–2, 7 (seam, mapping, adoption),
+- **Informed by:** ADR-0001 (authority rule), ADR-0002 §§1–3, 7 (seam, mapping, Steward, adoption),
   ADR-0003 §1 (`claims`, `extract_metadata`), ADR-0004 (record grammar, merge, tombstones),
   ROADMAP §2 (Collections row), `docs/spec/cli-tui.md` §§1.4, 4.6–4.7
 
@@ -39,7 +39,7 @@ Three properties are load-bearing, and each is a consequence of a decision alrea
 |---|---|
 | **Collection** | The unit this module manages. Exactly one per Circle in v0.1, created with it, bound to the wallpaper Provider. |
 | **Item** | The domain object minted on import and retired by a tombstone. Identified by a ULID; *bound* to bytes by content hash. |
-| **Sidecar** | The derived per-Item metadata view. **Not a file** (ADR-0004 §4) — writing a Sidecar means appending one line to this Device's record log. |
+| **Sidecar** | The derived per-Item metadata view. **Not a file** (ADR-0004 §4) — a Sidecar is read, never written: `kith add` appends an `add` record to this Device's record log, and the Sidecar is what the reduction makes of it. |
 | **Provider** | Decides what may become an Item (`claims`) and supplies the facts recorded at import (`extract_metadata`). The wallpaper Provider in v0.1. |
 | **Person / Device** | Attribution (`by` = Person) versus write ownership (one log file per Device). ADR-0004 §5. |
 | **Circle** | The container. Its root is the Collection's root in v0.1. Lifecycle is `docs/spec/circles-members-invites.md` (#13); this spec starts once a `CircleRef` exists. |
@@ -402,7 +402,7 @@ Engine already knows the directory.
 | | **Branch A — the engine already replicates DIR** (a wp-sync install) | **Branch B — DIR is a plain directory** |
 |---|---|---|
 | Detection | `SyncEngine::circles()` contains a `CircleRef` whose `root` is DIR — for wp-sync, id `wallpapers` or `$WP_FOLDER_ID`, at `~/Pictures/Wallpapers` | no match |
-| Circle | **kept as it is**: same id, same root, same peers. Nothing is created, no bytes move, peers still running wp-sync keep syncing unmodified (ADR-0002 §7). | `create_circle(name, DIR)` — a fresh `kith-` id, this Device is founder and introducer |
+| Circle | **kept as it is**: same id, same root, same peers. Nothing is created, no bytes move, peers still running wp-sync keep syncing unmodified (ADR-0002 §7). | `create_circle(name, DIR)` — a fresh `kith-` id, this Device is founder and the Circle's Steward Device |
 | Then | § 4.2 config convergence, § 4.3 descriptors, § 4.4 content adoption | § 4.3 descriptors, § 4.4 content adoption |
 
 Auto-detection with no argument, zero candidates and several candidates behave as cli-tui §4.2
@@ -445,40 +445,66 @@ Additive only, and each line is ADR-0002 §2's recipe:
 Circle exactly one Device exists, so there is no question. In an adopted wp-sync Circle, Ana and
 Ben may both run `kith create --adopt` on Tuesday and there is no coordinator to arbitrate.
 
-**Decision: the Device the transport already treats as the Circle's introducer writes the
-descriptors; every other Device adopts into the descriptors that arrive.**
+**Decision: `circle.toml`'s `founder_device` names the Circle's Steward Device, and that is what
+every surface above the seam reads. The descriptor is written once, by the Device the transport
+already admits peers through; every other Device adopts into the descriptor that arrives.**
 
-wp-sync installs have exactly one introducer by construction — the script's introducer mode
-issues the code, friend mode flags that one peer. That is the only signal of who the Steward is
-— the Member whose Device the transport flags as introducer — that exists before any kith
-metadata does, and it is already visible above the seam: `kith list members` prints
-`"introducer": true` per Member (cli-tui §3.2).
+Two questions hide inside that, and keeping them apart is the whole of this section:
 
-> *Seam reference:* this spec relies on `PeerDevice.introducer: bool`, which ADR-0002 §1's
+- **Who is the Steward's Device, from now on?** `circle.toml`. It is a fact in the tree, it
+  reads the same from every vantage point, and it survives the engine being reconfigured. The
+  Steward's *Person* is the `founder_person` beside it, resolved through that Device's
+  Membership claim like every other attribution (ADR-0004 §5).
+- **Who writes `circle.toml` in the one moment before it exists?** The transport, because it is
+  the only thing that knows anything yet. A wp-sync install has exactly one Device that admits
+  peers, by construction, and the engine's device list is the only signal of which one that is
+  before any kith metadata does.
+
+That bootstrap signal is a fact about a **Device**, never about a Person. A peer that has never
+run kith has published no Membership claim, so kith may know which Device stewards the Circle
+and still be unable to name the Person behind it — which is exactly what the output below says
+rather than inventing a placeholder.
+
+> *Seam reference:* the bootstrap signal is `PeerDevice.introducer: bool`, which ADR-0002 §1's
 > `PeerDevice` carries — one field, no new method, no new endpoint (the folder's device list
-> already carries the flag). The seam budget (ROADMAP rule 2) is charged one field, and the CLI
-> surface already assumed it.
+> already carries the flag). The seam budget (ROADMAP rule 2) is charged one field. The word
+> stays behind the seam: above it — in prose, in `kith list members`, in `kith status` and in
+> the Members screen — this is the **Steward**, and the JSON field is `"steward": true`
+> (cli-tui §3.2).
+>
+> *And the flag is a cross-check, never the source of truth.* ADR-0002 §3's own rule is that the
+> Device the engine treats as introducer flags nobody, so `devices()` never returns self and on
+> that Device no peer carries the flag. The flag therefore cannot name the Steward's Device from
+> every vantage point; only `circle.toml` can. Once both exist and they disagree, `doctor` warns
+> under `circle.descriptor` — no new check — and `circle.toml` wins.
 
-| This Device | Adoption writes |
+| This Device, running `kith create --adopt` | Adoption writes |
 |---|---|
-| No peer in the Circle is flagged introducer → **this Device is the introducer** | `circle.toml` (`founder_*` = this Person/Device, `adopted = true`), `collections/main.toml`, its own Membership claim, then §4.4 |
-| Exactly one peer is flagged introducer → **this Device is a Member** | its own Membership claim, then §4.4. No descriptors. |
-| A descriptor already exists in the tree | nothing — read it and proceed to §4.4, on either Device |
+| `circle.toml` is already in the tree | no descriptors — read `founder_device` for the Steward's Device, write this Device's own Membership claim if it has none, then §4.4 |
+| No `circle.toml`, and a peer holds the engine's introducer entry → **that peer is the Steward's Device** | its own Membership claim, then §4.4. No descriptors: the ones that peer writes will arrive. |
+| No `circle.toml`, and no peer does → **this Device is the one that admits peers** | `circle.toml` (`founder_*` = this Person/Device, `adopted = true`), `collections/main.toml`, its own Membership claim, then §4.4 |
 
-A Member that adopts before the introducer has upgraded gets a working Collection immediately —
-the Gallery fills from §4.4 — and an honest gap:
+The third row is an inference, and it is the honest one available before any kith metadata
+exists: by ADR-0002 §3 the admitting Device sees no flagged peer, and a wp-sync Circle has
+exactly one such Device. Where that assumption fails — the admitting Device was removed from the
+engine's list, or two installs were stitched together by hand — two Devices may each write a
+descriptor. That is not a new failure mode: ADR-0004 §8 keeps one copy and `doctor` reports the
+collision loudly (below).
+
+A Member that adopts before the Steward's Device has upgraded gets a working Collection
+immediately — the Gallery fills from §4.4 — and an honest gap:
 
 ```
 Adopted Wallpapers (folder "wallpapers") at ~/Pictures/Wallpapers — 214 Items.
-This Circle has no kith record yet; it appears under its Sync Engine label and has no
-admin until ben-thinkpad upgrades to kith. Everything else works now.
+This Circle has no kith record yet; it appears under its Sync Engine label, and kith cannot
+name its Steward until ben-thinkpad runs kith. Everything else works now.
 ```
 
 `kith doctor` carries this as `circle.descriptor` = warn until the descriptor arrives. The
-escape hatch for a Circle whose introducer will never upgrade is `--claim`, which writes the
-descriptors anyway; its help text states the consequence plainly: if two Devices claim, ADR-0004
-§8 keeps the copy with the earliest `created` (ties → smallest `founder_device`) and `doctor`
-reports the collision loudly.
+escape hatch for a Circle whose Steward's Device will never upgrade is `--claim`, which writes
+the descriptors anyway; its help text states the consequence plainly: if two Devices claim,
+ADR-0004 §8 keeps the copy with the earliest `created` (ties → smallest `founder_device`) and
+`doctor` reports the collision loudly.
 
 > *Tie-break recorded here:* ADR-0004 §8 gives no tie-break for two `circle.toml` copies with an
 > identical `created`. This spec adds one — smallest `founder_device` — so that convergence never
@@ -518,19 +544,19 @@ A peer that never upgrades keeps working, and **adoption cannot break them**:
 #### 4.6 The walkthrough, for an adopting pair
 
 ```
-$ kith init                      # Ana, on the wp-sync introducer machine
+$ kith init                      # Ana, on the Steward's Device
 $ kith create walls --adopt
 Adopted the existing wallpaper tree at ~/Pictures/Wallpapers.
   circle      walls (kith kept the synced space it was already in — nothing moved)
   recovery    versioning enabled (keep 5, 30 days)
   auto-apply  disabled — wallpapers now wait in your Gallery
   items       214 adopted (0 bytes copied)
-You are this Circle's admin: invites and joins run on this Device.
+You are this Circle's Steward: invites and joins run on this Device.
 ```
 
-Ben, on a friend-mode machine, runs the same command and sees §4.3's Member variant. Neither
-Person moved a file, re-shared a folder, or re-invited anybody. ADR-0002's promise — *existing
-wp-sync installs adopt, not migrate* — is this section.
+Ben, on the machine that joined that tree, runs the same command and sees §4.3's Member variant.
+Neither Person moved a file, re-shared a folder, or re-invited anybody. ADR-0002's promise —
+*existing wp-sync installs adopt, not migrate* — is this section.
 
 ---
 
@@ -614,10 +640,10 @@ For each claimed, non-reserved file, after the record reduction (ADR-0004 §4.4 
 
 #### 6.3 Two anomalies that get named, not fixed
 
-- **Tombstoned Item with bytes on disk.** A modify/delete conflict, or an offline Device that
-  edited a file deleted meanwhile. The tombstone wins for the Gallery regardless (ADR-0004 §6);
-  `doctor` says `3 removed Items still have bytes on disk (11 MB) — deleting them again is the
-  ordinary Delete.`
+- **Tombstoned Item with bytes on disk.** A modify/delete conflict, or a Device that, while it
+  was not connected, edited a file deleted meanwhile. The tombstone wins for the Gallery
+  regardless (ADR-0004 §6); `doctor` says `3 removed Items still have bytes on disk (11 MB) —
+  deleting them again is the ordinary Delete.`
 - **Live Item with no bytes anywhere this Device can see.** Either still transferring, or
   someone `rm`'d it. kith cannot distinguish those from here, and says so: `4 Items have no
   bytes on this Device. They may still be arriving, or a Member may have deleted the files
@@ -675,12 +701,12 @@ Every field is derived from this Device's tree and cache. Nothing here is a netw
 
 | Question | Answer |
 |---|---|
-| How many Items are in this Collection? | *How many this Device has received records for.* A Member offline for a week has a smaller number, and it is not wrong — it is what they hold. |
+| How many Items are in this Collection? | *How many this Device has received records for.* A Member whose Device has not connected for a week has a smaller number, and it is not wrong — it is what they hold. |
 | How many bytes does this Collection use here? | `bytes_here`, exactly, from local `stat`. A fact. |
 | How big is the Collection in total? | `bytes_declared` — the sum of what the *records* claim, including Items whose bytes have not arrived. Label it as such; never present it as disk usage. |
-| Does Ben have this Item? | **kith cannot say.** The engine reports per-peer *completion of the whole synced space* as a percentage and a byte count, as of the last connection (ADR-0002 §1, `CircleStatus.peers`). That is folder-wide and byte-shaped; it cannot answer a per-Item question, and v0.1 does not ask one. `kith status` shows `Ben online (91%)` and stops there. |
+| Does Ben have this Item? | **kith cannot say.** The engine reports per-peer *completion of the whole synced space* as a percentage and a byte count, as of the last connection (ADR-0002 §1, `CircleStatus.peers`). That is folder-wide and byte-shaped; it cannot answer a per-Item question, and v0.1 does not ask one. `kith status` shows `Ben connected (91%)` and stops there. |
 | How much disk does Ben use? | **kith cannot say**, and there is nowhere to learn it from. |
-| Did a Member add and then remove something while I was away? | **Yes, and reliably** — both records live in the same append-only log, so a Device offline for a year receives the `add` and the `remove` together and reduces to the correct tombstone. This is a genuine property of the log design, not a hope. |
+| Did a Member add and then remove something while I was away? | **Yes, and reliably** — both records live in the same append-only log, so a Device that has not connected for a year receives the `add` and the `remove` together and reduces to the correct tombstone. This is a genuine property of the log design, not a hope. |
 | Was something added and removed by a Member who has since left? | Yes; Membership claims are never deleted (ADR-0004 §5), so the attribution still resolves to a named Person. |
 | Why does `bytes_declared − bytes_here` disagree with `kith status`'s "MB to receive"? | Because they measure different things: the first is Item bytes this Device lacks, the second is everything the engine still owes for the whole synced space, `.kith/` and conflict copies included. Both are printed; neither is adjusted to match the other. |
 
@@ -729,8 +755,8 @@ writes no descriptor, so nothing it does damages the others.
 | **Disk fills mid-import anyway** (a peer syncing in parallel) | The staged file is unlinked, so nothing partial lands in the tree. The run **stops immediately** — every subsequent copy would fail, and 400 identical error lines help nobody. Items already imported keep their records and their bytes. Exit 1, naming the filesystem, bytes free and bytes remaining. Re-running the same command resumes: everything already imported is a `Duplicate` skip. |
 | **Non-image content dropped into the tree by a Member** | Not claimed → not an Item → not a tile → not in `list items` → not in `items`/`bytes_here`. It still syncs to everyone, and kith says so rather than pretending it is not there: `doctor` reports `3 files in walls are not claimed by the wallpaper Provider (12 MB) — kith ignores them; they still sync to every Member.` kith never deletes them and never writes an ignore rule for them: it does not own the namespace, and an ignore would silently stop replicating a file a Member deliberately shared. |
 | **Partially-synced Item in the Gallery** | Impossible to see as a torn file: the engine writes `.syncthing.<name>.tmp` and renames into place, and that name is in `reserved_paths()`. The two real states are rendered distinctly — *record, no bytes* → placeholder tile carrying title, attribution and dimensions from the record; *bytes, no record* → arriving tile (below). |
-| **Bytes present, Sidecar not arrived** | Inside the 60 s settle window (§6.5) the file shows as an **arriving** tile: filename as its label, attribution `unknown`, never a fabricated Person. After the window it is adopted with `adopted: true`, and if the peer's record lands later the alias rule merges the two into one tile with the true adder's name. |
-| **Sidecar arrived, bytes not** | The normal case, by design — 250 bytes beat 4 MB. Placeholder tile, full fact line, and Preview's text tier renders from the record alone (ADR-0003 §5). Apply is offered but fails honestly (`ActionError::Unavailable`, "the bytes for this Item have not arrived yet") rather than being hidden. |
+| **Bytes present, the `add` record not arrived** | Inside the 60 s settle window (§6.5) the file shows as an **arriving** tile: filename as its label, attribution `unknown`, never a fabricated Person. After the window it is adopted with `adopted: true`, and if the peer's record lands later the alias rule merges the two into one tile with the true adder's name. |
+| **Record arrived, bytes not** | The normal case, by design — 250 bytes beat 4 MB. Placeholder tile, full fact line, and Preview's text tier renders from the record alone (ADR-0003 §5). Apply is offered but fails honestly (`ActionError::Unavailable`, "the bytes for this Item have not arrived yet") rather than being hidden. |
 | **A duplicate tile appears after adoption, then merges** | Expected and bounded (ADR-0004 §4.5): two Devices adopting the same pre-existing tree each write a record, and the tiles merge when the second log arrives. Documented in the adoption output, so it is a known behaviour rather than a bug report. |
 | **Re-adding content that was removed** | Revives the original Item with the original adder's name (§2.3). Stated in the CLI output at the moment it happens, because it is surprising: `sunset was removed from walls earlier — adding it back (originally added by Ana).` |
 | **Symlink in the Collection root, or as an import source** | Never adopted, never followed, never recreated. `doctor` names them: `2 symlinks in walls are not Items — kith does not sync links.` A symlink passed to `kith add` imports its **target's bytes** as an ordinary copy and leaves the link alone, with an `info` note. |
@@ -742,7 +768,7 @@ writes no descriptor, so nothing it does damages the others.
 | **Crash between recording and `--move`'s unlink** | The source file survives. Worst case is a copy the Person expected to be a move; re-running `kith add --move` reports `Duplicate` and leaves it. Never the reverse. |
 | **Stale staging files** | `.kith/local/incoming/` is swept at every `kith add` and at startup; entries older than 24 h are unlinked. It is ignored from sync and `(?d)`-marked, so nothing there is authoritative (ADR-0004 §7). |
 | **Descriptor names a Provider this build lacks** | `CollectionError::UnknownProvider`. No file is adopted, the Gallery is empty rather than wrong, and `doctor` says `walls's Collection uses the "comics" Provider, which this version does not have.` |
-| **Descriptor missing entirely** (adopted Circle, introducer not upgraded) | §4.3: the Collection works, named by the engine's folder label, with no admin. `circle.descriptor` warns until it arrives. |
+| **Descriptor missing entirely** (adopted Circle, the Steward's Device not upgraded) | §4.3: the Collection works, named by the engine's folder label, and kith cannot name its Steward until that Device runs kith. `circle.descriptor` warns until the descriptor arrives. |
 | **Conflict copy of a record log** | Absorbed, not resolved (ADR-0004 §8): it is read as one more log, the union is unchanged, and only the owning Device deletes it. Collections does nothing special. |
 | **A record's `at` is far in the future** | ADR-0004 §4.4's 24 h clamp applies: sorted at arrival position, rendered with `?`, named by `doctor`. Import never trusts a source file's mtime for a *new* `add` — only adoption uses mtime, and only because convergence requires it. |
 | **100 000 Items** | Works, and costs ~25 MB of records per Device (ADR-0004 §4.2). kith does not paginate the reduce in v0.1 and does not pretend it has been tested there; the wedge is tens of wallpapers, compaction is v0.3, and the honest statement is in the docs rather than in a benchmark nobody ran. |
@@ -759,7 +785,7 @@ The full CLI contract is `docs/spec/cli-tui.md`. What Collections owns:
 | `kith list items` | Rows are `CollectionView.items`, tombstones excluded, newest first by `added_at`. `SIZE` is the record's `size`; a byteless Item shows its size in parentheses and a `—` where the thumbnail state would be. |
 | `kith create <name> --adopt [DIR] [--claim]` | §4 in full: branch detection, config convergence, descriptor policy, content adoption, the auto-apply retirement, and the printed undo command. `--claim` is added here (§4.3). |
 | `kith status` | `items` comes from `CollectionStats.items`; the per-peer line stays byte-shaped and stale-labelled (§7). |
-| `kith doctor` | Contributes to `circle.<id>.sync` and adds the counts §7 names: unclaimed files, duplicate byte copies, tombstoned-with-bytes, byteless Items, symlinks, and `circle.descriptor`. Each is a `warn` at most — none of them is a broken Circle. |
+| `kith doctor` | Contributes to `circle.<id>.sync` and adds the counts §7 names: unclaimed files, duplicate byte copies, tombstoned-with-bytes, byteless Items, symlinks, and `circle.descriptor` — which also carries §4.3's Steward cross-check. Each is a `warn` at most — none of them is a broken Circle. |
 | Gallery (#15) | Consumes `CollectionView` only. Three tile states originate here: **normal**, **placeholder** (record, no bytes), **arriving** (bytes, no record, inside the settle window). Empty-state copy is cli-tui §6.5's. |
 | Preview (#15) | Fact line fields come from the record: title, `by` resolved to a Person through the Membership claims, `added_at`, `facts.width×height`, `size`. An `adopted` Item reads *found by Ana*, never *added by Ana*. |
 | Delete Action (#15) | Calls `remove` with §5.2's confirmation text. |

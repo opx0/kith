@@ -252,7 +252,7 @@ rendering the last good view meanwhile and re-lays out when the rebuild complete
 |---|---|
 | No Circles | `No Circles yet. Run kith create <name>, or kith join <code> if someone invited you.` (cli-tui.md §4.11) |
 | Circle with no Items | `Nothing here yet. kith add <paths…>, or wait — Ben's Items appear as they arrive.` — the Member name is the other Member's when there is exactly one, otherwise "the other Members'". |
-| Joined, nothing arrived yet | `Waiting for the first Items. Ana's Device has to be online too.` plus the Circle's sync state on the status row. Never a bare empty grid: a Person who just joined and sees nothing needs to know whether that is a bug. |
+| Joined, nothing arrived yet | `Waiting for the first Items. Ana's Device has to be connected too.` plus the Circle's sync state on the status row. Never a bare empty grid: a Person who just joined and sees nothing needs to know whether that is a bug. |
 | Favourites filter, nothing marked | §1.6. |
 
 ---
@@ -514,7 +514,7 @@ Entering Preview marks the Item seen (§3.1). ROADMAP: no zoom, no hash panel.
 │  added by Ana · today 09:14 · 3840×2160 · 1.9 MB · png               │
 │  Attribution is what the adding Device claimed; kith cannot prove it.│
 ├──────────────────────────────────────────────────────────────────────┤
-│ ● idle · 2 Members, 1 online                        kitty · swww     │
+│ ● idle · 2 Members, 1 connected                     kitty · swww     │
 │ j k next/prev · a apply · f fav · d delete · esc back · ? keys       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -533,7 +533,7 @@ Row 2 — the fact line, `·`-separated, in this fixed order:
 
 | Field | Source | Rendering |
 |---|---|---|
-| attribution | `ItemView.added_by`, resolved to a Person through the Membership claims (ADR-0004 §5) | `added by Ana`; this Person → `added by you`; `adopted: true` → **`found by Ana`**, because she did not add it, she was the first to find it on disk; no Membership claim → `added by unknown Person (P56IOI7…)`, never blank |
+| attribution | `ItemView.added_by`, resolved to a Person through the Membership claims (ADR-0004 §5) | `added by Ana`; this Person → `added by you`; `adopted: true` → **`found by Ana`**, because she did not add it, she was the first to find it on disk; no Membership claim → `added by unknown Person (p-01k1yf)` — the PersonId's short form, never a device id and never blank |
 | when | `ItemView.added_at` | `today 09:14`, `yesterday 21:03`, `3 days ago`, then absolute: `3 Aug 2026`. Clock-skewed (§1.3) → `dated 9 Aug 2026 (?)` |
 | resolution | `facts.width × facts.height` | `3840×2160`; facts absent (a record from a newer or foreign writer) → `resolution unknown` |
 | byte size | `ByteBinding.size` | SI: `847 B`, `12 kB`, `1.9 MB`, `12 MB`. One decimal below 10, none above. JSON surfaces carry integers (cli-tui.md §3.2) |
@@ -885,7 +885,7 @@ with its milestone.
 | Item removed while it is merely selected in the Gallery | The tile disappears; the selection moves to the next Item in sort order. No dialogue — a Person who was not looking at it does not need to be interrupted. |
 | Favourite on an Item that is later removed | The `fav` record survives; the Item does not appear in any view; the record is dropped at the next compaction. Harmless, and re-favouriting a restored Item is idempotent. |
 | Two kith processes running at once | Favourites append under `flock` (ADR-0004 §3). `state.toml` is temp-file-plus-rename, last writer wins; the cost is a few dots, which is exactly what §3.2's degradation rule already tolerates. |
-| Sync Engine offline | Everything in this document works: browse, thumbnails, Preview, Favourite, Apply, Delete, Reveal, Copy path. All of it reads the tree and the cache (ADR-0002 §6). The status row carries cli-tui.md §7.1's line; deletions and additions sync when the daemon returns. |
+| Sync Engine down | Everything in this document works: browse, thumbnails, Preview, Favourite, Apply, Delete, Reveal, Copy path. All of it reads the tree and the cache (ADR-0002 §6). The status row carries cli-tui.md §7.1's line; deletions and additions sync when the daemon returns. |
 | `Change::Desynced` | `resynchronising…` on the status row; the grid keeps rendering the last good view; the seen set survives, because it is not in the cache (§3.2). |
 | Every Item unseen after joining a Circle with 200 Items | Correct and intended: they are all new to this Device (§3.2). Clearing them is Preview plus held `j`; a bulk affordance is v0.2. |
 | No dots at all after `~/.local/state` was wiped | Correct and intended: kith cannot honestly claim anything arrived since the Person last looked, so it says nothing (§3.2's repair baseline). |

@@ -46,6 +46,13 @@ W1 keys on **Device**, not Person, because a Person gets a second Device in v0.3
 invariant must not need re-earning. Attribution keys on **Person**, carried *inside* the
 records. The two are bridged by the per-Device Membership claim (§5).
 
+W2 governs **record logs** and nothing else. **Descriptors are rewritable**: they are small,
+singleton, read-modify-write documents, replaced whole under §3's descriptor protocol
+(write beside, `fsync`, `rename`). That is not a loophole in W2 — W1 still holds, so a
+descriptor has exactly one writing Device and rewriting it races with nobody. It is how a
+Member's claim gets a new display name, a fresh `asserted`, or a `left_at` stamp on the way
+out (§5), and none of that is an append.
+
 The consequence worth stating plainly: **this design is a CRDT** — a grow-only set of records
 with a deterministic reducer. It is just one whose on-wire format is `tail -f`-able text and
 whose repair tool is a text editor, rather than an opaque blob (§ Alternatives).
@@ -154,7 +161,7 @@ Circle's record logs — the domain object CONTEXT.md names, made concrete.
 | Thing | Form | Notes |
 |---|---|---|
 | Item id | ULID (26-char Crockford base32) | Minted once by the adding Device. **Never changes** — this is what lets an Item survive being moved, renamed or re-encoded (CONTEXT.md). |
-| Person id | ULID | Minted at `kith init`, stored in `identity.toml`, identical across every Circle. No new correlation risk: the Device id is already shared across Circles by the engine. |
+| Person id | `p-` + ULID (26-char Crockford base32, lowercase), e.g. `p-01k1yfq2m7vj3w8t0pz4rxab6c` | Minted at `kith init`, stored in `identity.toml`, identical across every Circle. The prefix is load-bearing, not decoration: it makes a PersonId self-describing in an error message and unmistakable for a Device identity, which is the one confusion this ADR cannot afford (§5). Short form = the first 6 characters after the prefix, `p-01k1yf`. No new correlation risk: the Device id is already shared across Circles by the engine. |
 | Device id | the engine's device identity, canonical form | Opaque above the seam; used only as a filename and a merge tie-break. |
 | Content hash | `b3:` + 64 hex chars (BLAKE3) | The *binding* between an Item and the bytes currently representing it — never the Item's identity. |
 | Timestamp | RFC 3339 UTC, milliseconds, `Z` | The writer's wall clock. Honest limits in §4.4. |
@@ -196,7 +203,7 @@ The Collection is encoded by the log's directory and the Device by its filename,
 a field. One line, as actually written:
 
 ```json
-{"v":1,"k":"add","seq":7,"at":"2026-08-07T09:14:02.117Z","by":"01K1YFQ2M7VJ3W8T0PZ4RXAB6C","item":"01K1YFQ2M9CQ2E7B5NK0YH3RVD","path":"sunset.png","hash":"b3:5f2c9d…a10","size":1987654,"title":"sunset","facts":{"provider":"wallpaper","width":3840,"height":2160,"format":"png"}}
+{"v":1,"k":"add","seq":7,"at":"2026-08-07T09:14:02.117Z","by":"p-01k1yfq2m7vj3w8t0pz4rxab6c","item":"01K1YFQ2M9CQ2E7B5NK0YH3RVD","path":"sunset.png","hash":"b3:5f2c9d…a10","size":1987654,"title":"sunset","facts":{"provider":"wallpaper","width":3840,"height":2160,"format":"png"}}
 ```
 
 ~250 bytes per record. A 1000-Item Collection with five Members costs roughly 1.5 MB of
@@ -295,19 +302,30 @@ contending for one file.
 # .kith/members/<device-id>.toml — the Membership claim; sole writer = this Device
 schema       = 1
 device       = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2"
-person       = "01K1YFQ2M7VJ3W8T0PZ4RXAB6C"
+person       = "p-01k1yfq2m7vj3w8t0pz4rxab6c"
 display_name = "Ana"
 asserted     = "2026-08-07T09:02:11.004Z"
+# left_at    = "2026-09-01T18:20:00.000Z"   # optional; absent until this Member leaves
 
-# RESERVED, unwritten in v0.1 — succession (ADR-0002 §3), lands as a command in v0.2:
+# RESERVED, unwritten in v0.1 — succession (ADR-0002 §3) and Role editing, both v0.2:
 # [steward]
 # asserted    = "…"
 # predecessor = "<device-id>"
+# [grants]
+# "p-01k1yf…" = "admin"
 ```
 
+That is the whole field set — five written fields, one optional `left_at`, and the two
+reserved tables. `asserted` is the claim's single freshness field: every tie-break in this
+ADR reads *newest `asserted`*, and there is no second timestamp to disagree with it.
+
 Written by the founder at `create_circle` and by the joiner immediately after
-`complete_join`. **Never deleted** — which is precisely how attribution survives Devices coming
-and going: an expelled Device's claim stays in the tree, so its records keep resolving to a
+`complete_join`, then **re-written in place** whenever one of its facts changes — a new
+display name, a re-assertion after a conflict copy (§8), or the `left_at` stamp a departing
+Member writes on the way out. Each of those is a descriptor rewrite under §3, which §1 makes
+explicitly legal; none is an append. **Never deleted** — leaving stamps `left_at`, it does not
+remove the file — which is precisely how attribution survives Devices coming and going: a
+departed or expelled Device's claim stays in the tree, so its records keep resolving to a
 named Person forever.
 
 **Keyed by Device, attributed to Person.** The filename and the `device` field exist only to
@@ -322,11 +340,15 @@ Derivation:
 | Question | Answer |
 |---|---|
 | Who is Person P? | Devices = every Membership claim with `person = P`; display name = the claim with the newest `asserted` (ties → smallest device id, and `doctor` reports the disagreement). |
-| Who added this Item? | The `by` of the winning `add`, resolved through the Membership claims. No claim → *Unknown Person (`P56IOI7…`)*, never a blank. |
-| What is P's Role? | v0.1: `admin` iff P is `circle.toml`'s `founder_person` or the current Steward; otherwise `member`. Role *editing* (v0.2) lands as a `[grants]` table in the Membership claim of the Steward's Device — still single-writer, still no migration. |
+| Who are the Circle's Members? | Every distinct `person` across the claims that carry no `left_at`. A claim with `left_at` is a past Member: it still resolves attribution, it just stops counting toward Membership. |
+| Who added this Item? | The `by` of the winning `add`, resolved through the Membership claims. No claim names that Person → *unknown Person (`p-01k1yf`)*, the PersonId's short form — never a blank, and never a device id standing in for a Person. |
+| Who is the Circle's Steward? | v0.1: the Person named by the Membership claim of `circle.toml`'s `founder_device`. The `[steward]` table is reserved and unwritten until v0.2 succession (ADR-0002 §3), so `founder_device` is the only record there is. If that Device has never run kith it has published no claim, and the honest answer is that the Circle knows the Steward's *Device* and not the Steward — no placeholder Person is invented (ADR-0002 §7). |
+| What is P's Role? | v0.1: `admin` iff P is `circle.toml`'s `founder_person` or the Circle's current Steward (row above); otherwise `member`. Role is **derived from the claims plus `circle.toml`, never written to a file of its own** — a Steward-written roles map would be a second writer surface duplicating the claim. Role *editing* (v0.2) lands as a `[grants]` table in the Membership claim of the Steward's Device — still single-writer, still no migration. |
 
 **Circle and Collection descriptors** are the two singletons, and v0.1's ROADMAP row ("no
-rename, no delete, no Circle settings") makes them write-once:
+rename, no delete, no Circle settings") makes them write-once — *by milestone, not by
+format*. Nothing about a descriptor forbids a rewrite (§1), so when a later milestone gains
+rename it is a read-modify-write under §3 and not a new record kind:
 
 ```toml
 # .kith/circle.toml — written once by the founding Device, never rewritten.
@@ -334,8 +356,8 @@ schema         = 1
 circle         = "kith-4tj2q9xa"
 name           = "walls"
 created        = "2026-08-07T09:02:11.004Z"
-founder_person = "01K1YFQ2M7VJ3W8T0PZ4RXAB6C"
-founder_device = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2"
+founder_person = "p-01k1yfq2m7vj3w8t0pz4rxab6c"
+founder_device = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2"   # v0.1: the Steward's Device
 ```
 
 ```toml
@@ -475,7 +497,7 @@ to change in any release without touching a Circle.
 1. Drop the database file; recreate it empty.
 2. For each `CircleRef` from `SyncEngine::circles()`: read `circle.toml`, every
    `collections/*.toml`, every `members/*.toml` Membership claim.
-3. Stream every `items/<collection>/*.jsonl` (conflict copies included) through §4.4's reducer,
+3. Stream every `items/<collection-id>/*.jsonl` (conflict copies included) through §4.4's reducer,
    recording each log's end offset and `seq`.
 4. Walk each Collection root, hashing Provider-claimed files, and reconcile per §4.4 step 5 —
    appending `bind`/`add` records to *this Device's own* log for re-encodes and orphans.
@@ -498,7 +520,7 @@ are stated because a timeline that lies is worse than no timeline:
 
 | Half | Derived from | Consistency |
 |---|---|---|
-| **Durable, Circle-wide** | `add` (Item added by P at T), `remove` (removed by P at T), Membership claims (`asserted` → Person joined) | Survives cache rebuild, replays identically on every Device, and is complete for everything the Device has received. |
+| **Durable, Circle-wide** | `add` (Item added by P at T), `remove` (removed by P at T), Membership claims (`asserted` → Person joined; `left_at` → Person left) | Survives cache rebuild, replays identically on every Device, and is complete for everything the Device has received. |
 | **Ephemeral, Device-local** | the engine change feed: peers connecting, sync errors, arrival times | Not replicated, not replayable, starts when kith started, and gone after `Change::Desynced`. |
 
 Honest limits, to be printed near the feature rather than discovered:
@@ -529,9 +551,9 @@ Honest limits, to be printed near the feature rather than discovered:
   through `kith doctor`: *N records written by a newer kith (schema 2) — upgrade to see them.*
   Degraded, never broken; the same posture as the preview ladder.
 - **A breaking change is a new path, not a rewrite.** `v2` records land in
-  `.kith/v2/items/<collection>/<device>.jsonl` with the v1 logs left in place and still read.
+  `.kith/v2/items/<collection-id>/<device-id>.jsonl` with the v1 logs left in place and still read.
   Nothing an upgrade does ever deletes from the tree.
-- **Compaction (v0.3)** is owner-only and writes a *new generation* — `<device>.2.jsonl` —
+- **Compaction (v0.3)** is owner-only and writes a *new generation* — `<device-id>.2.jsonl` —
   then deletes generation 1. No in-place rewrite, so W2 survives compaction, and §4.3's naming
   rule already reads it.
 - **Reserved and unwritten in v0.1**, each with its milestone: the `meta` record (titles and
@@ -613,7 +635,7 @@ is smaller than the one already accepted — anyone who can forge attribution ca
 everything instead. Reserved as an additive field so the decision is revisitable, not a
 rewrite.
 
-**Favourites synced but namespaced per Person (`.kith/private/<device>.jsonl`).** Rejected:
+**Favourites synced but namespaced per Person (`.kith/private/<device-id>.jsonl`).** Rejected:
 "private" inside a directory every Member holds a byte-identical copy of is a lie, and the
 glossary's rule is that marking an Item announces nothing. Local-only makes that true rather
 than polite.

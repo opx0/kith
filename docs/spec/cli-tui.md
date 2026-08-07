@@ -35,7 +35,7 @@ sorting, unseen/favourite markers, Sidecar fact layout and the Action set belong
 | **Invite** | Produced by `kith invite` as one paste-able code; consumed by `kith join`; gated by `kith approve` / `kith reject` and the join prompt. |
 | **Collection** | Implicit in v0.1 — one per Circle. `kith add` imports into it; `kith list items` and the Gallery read it. |
 | **Item** | Addressed by the Item ref grammar (§1.4); rendered as rows in `kith list items`, tiles in the Gallery. |
-| **Sidecar** | Read for the facts shown in `list items`, Preview and Members; written by `kith add`. Format is ADR-0004's. |
+| **Sidecar** | The derived per-Item view read for the facts shown in `list items`, Preview and Members; `kith add` appends the `add` record it is derived from. Format is ADR-0004's. |
 | **Favourite** | Toggled by `f`; private, never printed to anyone else's surface, never sent across the seam. |
 | **Provider / Action / Apply** | The action menu, the `a` key, the monitor picker, and `doctor`'s apply section. Availability and reasons per ADR-0003 §3. |
 | **Sync Engine** | Surfaced by `kith status`, `kith doctor` and the TUI status bar. Named "Sync Engine" everywhere except actionable setup instructions (§7.8). |
@@ -198,8 +198,8 @@ object, success or failure.
 ```json
 {"schema":1,"command":"list.members","ok":true,"exit":0,
  "data":{"circle":{"id":"kith-4npq7x2b","name":"walls"},
-         "members":[{"person":"Ana","role":"admin","presence":"online","device":"WXYZ123","introducer":true},
-                    {"person":"Ben","role":"member","presence":"offline","device":"KX7QF2A","introducer":false,"last_seen":"2026-08-07T09:12:44Z"}]},
+         "members":[{"person":"Ana","role":"admin","presence":"connected","device":"WXYZ123","steward":true},
+                    {"person":"Ben","role":"member","presence":"not_connected","device":"KX7QF2A","steward":false}]},
  "notes":[{"level":"caveat","code":"role.advisory","message":"Roles are agreements, not enforcement…"}]}
 ```
 
@@ -230,7 +230,10 @@ Person is told. Standing codes: `role.advisory`, `preview.degraded`, `apply.unav
 
 Timestamps are RFC 3339 UTC. Byte counts are integers, never pre-formatted strings.
 Person names are strings as typed. Device ids are the 7-character short form; the full id
-appears only as `device_full` in `status` and `doctor`.
+appears only as `device_full` in `status` and `doctor`. Presence is always the string
+`"connected"`, `"not_connected"` or `"unknown"` — never a boolean, and never a last-seen
+timestamp (§7.5). The Steward is `"steward": true` on exactly one member row, read from
+the Circle descriptor and not from the seam (§4.7).
 
 ### 4. The verbs
 
@@ -249,8 +252,9 @@ Creates the Person on this Device and binds the Device to them.
   Absent and not a terminal → exit 64.
 - Calls `SyncEngine::local_device()` for the Device id. The engine is required: the
   binding is meaningless without it. Unreachable → exit 69 and **nothing is written**.
-- Writes `$XDG_STATE_HOME/kith/person.toml` (§8.3). The Identity itself — the daemon's
-  certificate — is neither read nor copied nor backed up (ADR-0002 §2).
+- Writes `$XDG_DATA_HOME/kith/identity.toml` (§8.3) — data, not state: it is one of the two
+  things kith cannot rebuild. The Identity itself — the daemon's certificate, the other one —
+  is neither read nor copied nor backed up (ADR-0002 §2).
 - Already initialised → exit 64, `identity.exists`, message
   `kith: this Device already speaks for Ana. v0.1 has no rename.` Nothing is changed.
 
@@ -269,8 +273,9 @@ Next: kith create <name> to start a Circle, or kith join <code> if someone invit
 kith create <NAME> [--path <DIR>] [--adopt [<DIR>]]
 ```
 
-Creates a Circle, its sole Collection, and makes this Device the Circle's admin and its
-single introducer (ADR-0002 §3).
+Creates a Circle, its sole Collection, and makes this Person the Circle's admin and its
+sole Steward — this Device is the Circle's only way in, and `circle.toml` records it as
+`founder_device` (ADR-0002 §3, ADR-0004 §5).
 
 - `<NAME>`: 1–64 printable characters, unique among this Device's Circles (case-insensitive).
   Duplicate → exit 64 `circle.duplicate_name`.
@@ -288,11 +293,11 @@ single introducer (ADR-0002 §3).
   `kith create --adopt` too.
 - Requires Identity and the engine: missing Identity → 64, unreachable → 69, nothing written.
 
-`data`: `{"circle":{"id":"kith-4npq7x2b","name":"walls","root":"/home/ana/kith/walls","role":"admin","introducer":true,"adopted":false}}`
+`data`: `{"circle":{"id":"kith-4npq7x2b","name":"walls","root":"/home/ana/kith/walls","role":"admin","steward":true,"adopted":false}}`
 
 ```
 Created walls (kith-4npq7x2b) at ~/kith/walls.
-You are this Circle's admin: invites and joins run on this Device.
+You are this Circle's Steward and its admin: invites and joins run on this Device.
 Next: kith add <paths…>, then kith invite.
 ```
 
@@ -307,8 +312,8 @@ Prints one time-bounded Invite code.
 - Admin only. A member Role → exit 77 `role.refused` with the short caveat (§7.2) and the
   admin's name.
 - `--expires` accepts `30m`, `12h`, `7d`; default `24h`; hard cap `7d` (beyond → exit 64).
-- The ticket is ADR-0002 §2's `InviteTicket` — Circle id and name, this Device as
-  introducer, address hints, issue and expiry times, nonce — serialised with `postcard`,
+- The ticket is ADR-0002 §2's `InviteTicket` — Circle id and name, this Device as the
+  Steward's Device, address hints, issue and expiry times, nonce — serialised with `postcard`,
   Crockford-base32 encoded, CRC32 suffixed, prefixed `kith1`. One line, typically 110–160
   characters, case-insensitive on input with hyphens and whitespace ignored so a code
   survives being wrapped by a chat client.
@@ -361,7 +366,9 @@ touching the engine's global auto-accept setting.
 `Ctrl-C` while waiting cancels the wait, not the knock: `still pending — Ana can still
 admit you; run kith or kith status later to finish.`
 
-`data`: `{"join":{"circle":"walls","state":"joined"|"pending","root":"/home/ben/kith/walls","introducer":"WXYZ123"}}`
+`data`: `{"join":{"circle":"walls","state":"joined"|"pending","root":"/home/ben/kith/walls","steward_device":"WXYZ123"}}`
+— the Device, not the Person: until that Device's Membership claim arrives, the joiner has
+the Steward's Device and no name to put to it.
 
 #### 4.5 `kith approve` / `kith reject`
 
@@ -374,7 +381,7 @@ kith reject  [<REQUEST>] [--all] [--circle <CIRCLE>]
 either is accepted. With no argument: exactly one pending → that one; several → exit 64
 listing them; none → exit 0 with `data.pending: []` and `no pending join requests`.
 
-- Admin only. Only the introducer's Device ever sees knocks, so a member Role invoking
+- Admin only. Only the Steward's Device ever sees knocks, so a member Role invoking
   either verb gets exit 77 and
   `Only Ana can admit Members — membership changes run on the admin's Device.`
 - **Expiry is checked here**, on the gatekeeper's own hardware (ADR-0002 §4). If no
@@ -394,7 +401,7 @@ listing them; none → exit 0 with `data.pending: []` and `no pending join reque
 
 ```
 Admitted ben-thinkpad (KX7QF2A) to walls.
-Sync begins when both Devices are online.
+Sync begins when both Devices are connected.
 ```
 
 ```
@@ -416,12 +423,14 @@ Imports bytes into the Circle's Collection as Items.
   with reason `not a wallpaper (image/svg+xml)`.
 - Default copies bytes into the Collection root. `--move` renames within a filesystem,
   copy-then-unlink across one. A path already inside the Circle root is **registered in
-  place** — no copy, no move — which is how an adopted tree gets its Sidecars.
+  place** — no copy, no move — which is how an adopted tree's bytes become Items.
 - Name collision in the Collection: identical content hash → skipped as `duplicate`
   (`info`, does not affect the exit code); different content → imported as `sunset-2.png`
   with an `info` note.
-- Every imported Item gets a Sidecar attributing it to this Person with the import time
-  and the Provider's extracted facts (ADR-0003 §1, format per ADR-0004).
+- Every imported Item appends an `add` record whose `by` field names this Person, carrying
+  the import time and the Provider's extracted facts (ADR-0003 §1, format per ADR-0004).
+  The Sidecar is the per-Item view derived from those records — `ItemView.added_by` is what
+  a surface renders — so `add` writes a record and never a Sidecar.
 - `--dry-run` reports the same shape and writes nothing.
 - **Works with the engine down.** Bytes land in the tree and sync when the daemon returns;
   a `warn` note says so and the exit code stays 0. This is ADR-0002 §6's promise made
@@ -463,13 +472,23 @@ filters, no sort flags (the Gallery owns filtering, and v0.1's only filter is fa
 
 **`circles`** — `NAME  ID  ROLE  MEMBERS  ITEMS  STATE  ROOT`.
 
-**`members`** — `PERSON  ROLE  PRESENCE  DEVICE`, with the full Role caveat printed
-below the table on stderr, and as a `caveat` note under `--json`.
+**`members`** — `PERSON  ROLE  PRESENCE  DEVICE  STEWARD`, with the full Role caveat
+printed below the table on stderr, and as a `caveat` note under `--json`. Presence is
+`connected`, `not connected` or `unknown` (§7.5). The `STEWARD` cell reads `steward` on
+exactly one row and is empty on every other; under `--json` it is `"steward": true`.
+
+*Call recorded here:* that mark is read from `circle.toml`'s `founder_device`, never from
+the Sync Engine's peer flags. The seam's device list never returns this Device, and by
+ADR-0002 §3's own rule the Steward's Device flags no peer as the way in — so on the
+Steward's own machine no row would carry the mark at all, and a flag that answers
+differently depending on who is asking cannot be the source of truth. The seam's flag is a
+cross-check only: a mismatch is a `doctor` warning (§5), and `circle.toml` wins.
 
 Listing never needs the engine. With it down, `items` and `circles` read the synced tree
-and cache and exit **0** — the list is real. `members` prints `presence: unknown` or
-`last seen 2h ago`, adds `presence.stale`, and still exits 0. Only `status` treats
-unreachability as its own result (§4.8).
+and cache and exit **0** — the list is real. `members` reports every Presence as
+`unknown` — this Device holds no connection and will not guess at one — adds
+`presence.stale`, and still exits 0. The `STEWARD` cell is unaffected: it comes off disk.
+Only `status` treats unreachability as its own result (§4.8).
 
 #### 4.8 `kith status`
 
@@ -487,12 +506,18 @@ You           Ana (WXYZ123)
 walls  kith-4npq7x2b  ~/kith/walls
   state     syncing · 62% · 118 MB to receive
   items     42
-  members   2 — Ben online (91%), Ana this Device
-  admin     you (this Device is the Circle's introducer)
+  members   2 Members, 1 connected — Ben 91%, Ana this Device
+  steward   you — every join is approved on this Device
   changed   4 minutes ago
 ```
 
-`data` mirrors it: `{"engine":{"reachable":true,"version":"2.0.4","address":"…","credentials":"~/.local/state/syncthing/config.xml"},"person":{…},"circles":[{"id":…,"state":"syncing","percent":62,"bytes_needed":123456789,"items":42,"conflicts":0,"peers":[{"person":"Ben","device":"KX7QF2A","connected":true,"percent":91}],"introducer":"WXYZ123","last_change":"…"}]}`
+`data` mirrors it: `{"engine":{"reachable":true,"version":"2.0.4","address":"…","credentials":"~/.local/state/syncthing/config.xml"},"person":{…},"circles":[{"id":…,"state":"syncing","percent":62,"bytes_needed":123456789,"items":42,"conflicts":0,"peers":[{"person":"Ben","device":"KX7QF2A","presence":"connected","percent":91}],"steward_device":"WXYZ123","steward_person":"Ana","last_change":"…"}]}`
+
+The Steward line reads `circle.toml`'s `founder_device`, like §4.7's mark and for the same
+reason. When that Device is not this one the line names the Person and the Device —
+`steward   Ben (KX7QF2A)`. When it has published no Membership claim, kith says so instead
+of inventing a name — `steward_person` is `null` and the line reads
+`steward   KX7QF2A — no Membership claim yet, so kith cannot name the Person`.
 
 Exit 69 when the engine is unreachable — local facts still print, prefixed by the offline
 line (§7.1) — so `kith status` is usable as a health probe. Otherwise 0, including while
@@ -548,11 +573,11 @@ else is broken".
 | `engine.credentials` | credentials | Where address + API key came from (ADR-0002 §6 order) | found only in the legacy `~/.config/wp-sync/identity` | not found anywhere |
 | `engine.reachable` | reachable | `SyncEngine::health()` | address is non-loopback (note `engine.remote`) | `Unreachable`, or `Unauthorized` |
 | `engine.version` | version floor | daemon ≥ v1.13 (pending endpoints) | ≥ floor but untested major | below floor |
-| `identity.person` | Person | `person.toml` exists and names a Person | — | missing |
+| `identity.person` | Person | `$XDG_DATA_HOME/kith/identity.toml` exists and names a Person | — | missing |
 | `identity.device` | Device binding | recorded Device id == `local_device()` | engine unreachable, so unverifiable | mismatch — this daemon is not the one you initialised against |
 | `circle.<id>.root` | *name* · root | root exists, is a directory, is writable | — | missing or read-only |
 | `circle.<id>.sync` | *name* · sync | engine state, Item count, bytes behind | state is `error`, or conflict copies exist | the engine does not know this Circle |
-| `circle.<id>.peers` | *name* · peers | Member count and how many are connected | Members exist but none connected | — |
+| `circle.<id>.peers` | *name* · peers | Member count, how many are connected, and whether the seam still agrees with `circle.toml` about which Device is the Circle's way in | Members exist but none connected; or the seam's own record disagrees with `founder_device` (§4.7 — `circle.toml` wins, this is only a cross-check) | — |
 | `circle.<id>.recovery` | *name* · recovery | versioning configured per ADR-0002 §2 | versioning absent or non-conforming | — |
 | `preview.protocol` | protocol | Rung chosen by `ratatui-image`'s query | `halfblocks` — degraded, never broken | — |
 | `preview.cell_size` | cell size | Terminal cell pixel size for budgets (ADR-0003 §5) | not reported; kith assumes 8×16 | — |
@@ -577,12 +602,12 @@ Sync Engine
   ✓ reachable         http://127.0.0.1:8384
   ✓ version floor     v2.0.4 (needs ≥ 1.13)
 Identity
-  ✓ Person            Ana
+  ✓ Person            Ana · ~/.local/share/kith/identity.toml
   ✓ Device binding    WXYZ123 matches this daemon
 Circles
   ✓ walls · root      ~/kith/walls (writable)
   ✓ walls · sync      idle · 42 Items · nothing to receive
-  ! walls · peers     1 Member, 0 online
+  ! walls · peers     1 Member, 0 connected
     → Ben's Device has not connected. Discovery is the Sync Engine's job; check that
       Syncthing is running on both machines and on the same network.
   ✓ walls · recovery  versioning on (keep 5, 30 days)
@@ -606,7 +631,7 @@ never the sole signal (§7.6).
 
 **Exit:** 0 when no check failed, 1 when any did. Warnings never fail the run. Halfblocks
 is the shipped fallback, not a defect; an apply backend is optional to the wedge; a
-Circle with nobody online yet is Tuesday.
+Circle with nobody connected yet is Tuesday.
 
 `--json` gives `data.checks` as an array of `{"id","section","title","status","detail","fix"}`
 plus `data.summary` `{"ok":14,"warn":2,"fail":0,"skip":0}`. This is the machine-readable
@@ -627,7 +652,7 @@ Three fixed rows around one content area, every screen:
 │  content — Gallery grid, Preview pane, or Members list             │
 │                                                                    │
 ├────────────────────────────────────────────────────────────────────┤
-│ ● syncing 62% · 2 Members, 1 online              kitty · swww      │   status
+│ ● syncing 62% · 2 Members, 1 connected           kitty · swww      │   status
 │ j k h l move · enter preview · a apply · f fav · m members · ? keys│   hints
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -772,19 +797,24 @@ above them:
   → ben-thinkpad   KX7QF2A   knocked 2 minutes ago        enter to decide
 
   Members
-    Ana            admin     this Device · introducer
-    Ben            member    online · 91%
+    Ana            admin     this Device · steward
+    Ben            member    connected · 91%
 
   Roles are agreements, not enforcement — admission is the only gate.
   L leave circle · enter decide · esc back
 ```
+
+The `steward` mark is `circle.toml`'s `founder_device`, for §4.7's reason: the seam flags
+nobody on the Steward's own Device, so a screen that read the flag would show no Steward
+on the one machine that is certain to have one. Presence reads `connected`,
+`not connected` or `unknown` (§7.5) — never "online".
 
 *Call recorded here:* pending joins live on the Members screen as well as in the prompt.
 The prompt is a moment; a Circle admin who pressed `Esc` needs somewhere to go back to,
 and "the screen that lists who is in this Circle" is that place. No new screen is added.
 
 **Join prompt** — raised automatically on `Change::JoinRequested` when this Device is the
-introducer and the Gallery or Members is focused; elsewhere it queues and the title row
+Steward's Device and the Gallery or Members is focused; elsewhere it queues and the title row
 shows `1 wants to join` until Members is visited. Never raised over a confirm, and never
 over Preview — an interruption that steals a keystroke during Apply is how consent rules
 get broken by accident.
@@ -806,11 +836,11 @@ get broken by accident.
 **Circle switcher** — `c`, a plain list, exactly what ROADMAP asks for:
 
 ```
-  ┌ Switch Circle ─────────────────────────┐
-  │ > walls     42 Items   1 Member online │
-  │   photos    11 Items   nobody online   │
-  │ j k move · enter switch · esc cancel   │
-  └────────────────────────────────────────┘
+  ┌ Switch Circle ────────────────────────────┐
+  │ > walls     42 Items   1 Member connected │
+  │   photos    11 Items   nobody connected   │
+  │ j k move · enter switch · esc cancel      │
+  └───────────────────────────────────────────┘
 ```
 
 With one Circle, `c` does not open: the status row says `walls is your only Circle.`
@@ -888,9 +918,12 @@ broken.
 
 #### 7.5 Presence and progress honesty
 
-Presence is `online` / `offline` only from live engine state. Otherwise it is
-`last seen 2h ago`, or `unknown` when there is nothing to base it on — never inferred.
-Percentages come only from `Change::PeerProgress` / `FolderCompletion`; with no figure,
+Presence is `connected` or `not connected` only while this Device has live engine state to
+read; otherwise it is `unknown`, which is a real answer and not a polite way of saying no.
+There is no history behind it: kith records no last-seen time anywhere, so no surface can
+print one, and a Member this Device cannot reach may be connected to every other Member.
+JSON emits `"presence": "connected" | "not_connected" | "unknown"` (§3.2); human counts
+read `2 Members, 1 connected`. Percentages come only from `Change::PeerProgress` / `FolderCompletion`; with no figure,
 the surface says `syncing…` and shows an indeterminate spinner rather than a fabricated
 bar. A count kith cannot verify is printed as `—`.
 
@@ -981,14 +1014,14 @@ cache sizes and TUI layout (not settings — behaviour).
 | Path | Holds | Authority |
 |---|---|---|
 | `~/.config/kith/config.toml` | §8.2 | Person-owned; kith reads it and never writes it |
-| `$XDG_STATE_HOME/kith/person.toml` | `name`, bound `device`, `created` | Local, durable, never synced, never escrowed |
+| `$XDG_DATA_HOME/kith/identity.toml` | `name`, bound `device`, `created` | Local, durable, never synced, never escrowed — one of the two things kith cannot rebuild, which is why it is data and not state |
 | `$XDG_STATE_HOME/kith/state.toml` | `last_circle`, TUI leftovers | Rebuildable; deleting it costs a switcher press |
 | `$XDG_STATE_HOME/kith/invites.toml` | Invites this Device issued, with expiry | Local; the admit-time expiry check reads it (§4.5) |
 | `$XDG_STATE_HOME/kith/pending-joins.toml` | Invites consumed, awaiting an offer | Local; consumed by the auto-completion rule (§4.4) |
 | `$XDG_CACHE_HOME/kith/cache.sqlite3` | SQLite cache, event cursor | Rebuildable by ADR-0001's authority rule; deletable at any time |
 | `$XDG_CACHE_HOME/kith/thumbs/` | `<content-hash>-<class>.png` (ADR-0003 §5) | Rebuildable |
 | `<circle root>/` | Items | Source of truth |
-| `<circle root>/.kith/` | Sidecars, Membership claims (`members/<device-id>.toml`), Roles (ADR-0004) | Synced source of truth |
+| `<circle root>/.kith/` | The Circle descriptor `circle.toml`, the Collection descriptor `collections/main.toml`, Membership claims (`members/<device-id>.toml`), and the record logs Sidecars are derived from (ADR-0004) | Synced source of truth |
 | `<circle root>/.kith/local/` | Per-Device scratch, never synced | Rebuildable |
 
 Favourites are per-Person and never cross the seam (ADR-0002 §2); where their bytes live
@@ -1006,7 +1039,7 @@ is ADR-0004's call, and this surface only toggles them through the Collection AP
 | `kith join`, then the admin never approves | Exit 75 after `--wait`. The knock stands; the message says the offer completes automatically next time kith runs (§4.4). |
 | `kith approve` when the Invite has expired | Exit 65 at admit time — the one gate that runs on the gatekeeper's own hardware (ADR-0002 §4). `→ kith invite` for a fresh one. |
 | A rejected Device knocks again | It reappears as pending. Stated plainly: `this is not a ban — kith has no blocklist in v0.1`. |
-| `kith add` of a path already inside the Circle root | Registered in place: a Sidecar is written, no bytes are copied or moved. |
+| `kith add` of a path already inside the Circle root | Registered in place: an `add` record is appended, no bytes are copied or moved. |
 | `kith add` while the Sync Engine is down | Items land locally, exit 0, `warn` note. They sync when the daemon returns. |
 | `kith add` of something not a wallpaper | Skipped with the Provider's reason; run exits 65 but every claimed Item still imported. |
 | Delete confirmation | `Delete sunset from walls? This deletes it for every Member. Other Devices keep the last 5 versions for 30 days; v0.1 has no restore. [y/N]` — the honesty is in the confirm, not in a footnote. |
@@ -1031,7 +1064,7 @@ Every row of ROADMAP §2's in-scope table, and nothing that is not a row of it.
 | Circles — create | `kith create <name>` | — |
 | Circles — list | `kith list circles` | Circle switcher (`c`) |
 | Circles — join via Invite | `kith join <code>` | automatic completion of the matching offer at startup (§4.4) |
-| Circles — founder is admin and sole introducer | shown by `create`, `status`, `list circles` | Members screen (`introducer`) |
+| Circles — founder is admin and sole Steward | shown by `create`, `status`, `list circles` | Members screen (`steward`) |
 | Collections — import a directory as Items | `kith add <path>…` | — (v0.2) |
 | Collections — adopt an existing wp-sync tree | `kith create <name> --adopt` | — |
 | Collections — list Items | `kith list items` | **Gallery** |
@@ -1064,8 +1097,8 @@ Every row of ROADMAP §2's in-scope table, and nothing that is not a row of it.
 | 1 install, daemon running | none — kith never owns the daemon |
 | 2 both run `kith doctor` | §5: `engine.reachable`, `preview.protocol` (kitty for Ana, halfblocks + warn for Ben) |
 | 3 Ana `kith init` | §4.1, prompts for her name |
-| 4 `kith create walls` | §4.2 — Circle, Collection, admin, introducer |
-| 5 `kith add ~/Pictures/walls/*` | §4.6 — Items with Sidecars attributing Ana |
+| 4 `kith create walls` | §4.2 — Circle, Collection, admin, Steward |
+| 5 `kith add ~/Pictures/walls/*` | §4.6 — Items with `add` records attributing Ana |
 | 6 `kith invite` | §4.3 — one code on stdout, framing on stderr |
 | 7 Ben `kith init`, `kith join <code>` | §4.1, §4.4 — knock, then wait |
 | 8 Ana approves | join prompt `a` (§6.5) or `kith approve` (§4.5) |
@@ -1086,7 +1119,7 @@ Named, with the milestone that gets them, so each can be refused by pointing at 
 | `kith rotate` (ADR-0003 §7) | Automation is cut from v0.1 | v0.2 |
 | `kith leave` as a verb | Leaving exists in v0.1 — on the Members screen | v0.2 with CLI parity |
 | `kith restore`, `kith versions` (ADR-0002 §4) | History is v0.3 and must be designed with Role honesty | v0.3 |
-| `kith circle adopt-steward` (ADR-0002 §3 succession — a surviving Member becomes the Steward, and their Device the Circle's introducer) | Members module ships without role editing or removal | v0.2 |
+| `kith adopt-steward` (ADR-0002 §3 succession — a surviving Member becomes the Steward, and their Device the Circle's way in; flat, because kith has no sub-verb grammar) | Members module ships without role editing or removal | v0.2 |
 | Conflict resolution UI | ADR-0002's resolve affordance needs the Health screen | v0.2 |
 | `kith status --watch`, `kith logs` | The TUI is the live view; nothing writes a log a Person is not shown | v0.2 |
 | Per-ticket Invite correlation at admit time | The pending-device record cannot carry the nonce (§4.5) | v0.2 |

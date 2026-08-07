@@ -47,9 +47,9 @@ shipping more steals time from it.
 | Module | v0.1 minimum — and ceiling |
 |---|---|
 | **Identity** | Create a Person profile (a name) on first run; bind this Device to it via the Sync Engine's device identity. One Device per Person in v0.1 — the Person/Device split is modelled from day one so a second Device lands later without migration. No avatars, no device grouping, no rename. |
-| **Circles** | Create, list, join via Invite. The founding Member is the Circle's admin and its single introducer. No rename, no delete, no Circle settings. |
+| **Circles** | Create, list, join via Invite. The founding Member is the Circle's Steward and its one admin. No rename, no delete, no Circle settings. |
 | **Collections** | Exactly one per Circle, created with it. Import an existing directory of wallpapers as Items (adopting the current wp-sync tree rather than recreating it, per ADR-0001). List Items. Modelled one-to-many from the start; opened up in v0.3. |
-| **Members** | List Members with name and online/offline state. Two Roles: admin, member — policy, not enforcement, stated honestly wherever shown. Leave a Circle. No kick, no role editing. |
+| **Members** | List Members with name and Presence. Two Roles: admin, member — policy, not enforcement, stated honestly wherever shown. Leave a Circle. No kick, no role editing. |
 | **Invites** | `kith invite` prints a time-bounded invite code; `kith join <code>`; the admin approves or rejects the pending join. Codes expire; no revoke (let it expire), no QR, no links. |
 | **Gallery** | TUI grid of the Collection's Items with image thumbnails on the preview ladder (kitty → iTerm2 → sixel → halfblocks), sorted by date added. Favourite marker and an unseen-Item dot — noticing new content *is* the wedge. No grouping, no filtering beyond a favourites toggle, no infinite scroll. |
 | **Preview** | Fullscreen Preview of one Item with its Sidecar facts: title, who added it, when, resolution, byte size. No zoom, no hash panel. |
@@ -69,7 +69,7 @@ Every cut is deliberate, and every one returns (or is ruled out in §5):
 
 | Module | Why it is cut | Returns |
 |---|---|---|
-| **Activity** | The wedge needs content to arrive, not to be narrated. Sidecars already record who added what and when, so the timeline is derivable later with no migration. | v0.2 |
+| **Activity** | The wedge needs content to arrive, not to be narrated. The `add` and `remove` records already carry who did what and when, so the timeline is derivable later with no migration. | v0.2 |
 | **Notifications** | The Gallery's unseen-Item dot covers the wedge; desktop-notification integration is a new platform surface. | v0.2 |
 | **Health** | `kith doctor`/`status` ship in v0.1 under the Sync Engine (see above); the Health *screen* — conflicts, storage, per-Member sync state — waits. | v0.2 |
 | **Automation** | Rotation and scheduling belong to the wallpaper Provider and need a scriptable `kith apply`; nothing in the wedge story rotates. | v0.2 (local rotation); v0.3 (rules, import watch) |
@@ -93,7 +93,7 @@ one Wayland session, one X11 — and not before. Nothing beyond it is required.
 4. Ana runs `kith create walls`. The Circle exists, with its Collection; behind the
    seam, a synced space is created.
 5. Ana runs `kith add ~/Pictures/walls/*`. Her existing wallpapers become Items, each
-   with a Sidecar attributing them to Ana.
+   with an `add` record attributing them to Ana.
 6. Ana runs `kith invite` and sends the printed code to Ben over any channel she
    already trusts. kith has no messaging and wants none.
 7. Ben runs `kith init`, then `kith join <code>`.
@@ -151,7 +151,7 @@ consciously:
   discovery of Circles. Invites travel over channels people already trust.
 - **No accounts, no registry, no identity recovery.** A Person exists because other
   People trust them; kith has no authority to restore what it never issued.
-- **No online-source scraping** (Wallhaven, Reddit, Unsplash fetchers). That is
+- **No web-source scraping** (Wallhaven, Reddit, Unsplash fetchers). That is
   Variety's scope creep and Variety already exists. Any downloader composes with
   `kith add` — composition over reinvention.
 - **No mobile apps, no GUI toolkit.** The official Android wrapper died of store

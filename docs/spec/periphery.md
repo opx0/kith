@@ -79,8 +79,9 @@ Membership claims' `asserted`) replays identically on every Device; the **epheme
 half (peers connecting, sync errors, arrival times, from the change feed) starts when the process
 started. Four limits ship printed next to the feature, not discovered: no happens-before, so
 two Members acting in the same second may show in either order (wall-clock order plus §4.4's
-24 h skew clamp); **record time, not arrival time**, so a week offline arrives as a week of
-correctly dated history at once; nothing is recorded about reading; only what reached this Device.
+24 h skew clamp); **record time, not arrival time**, so a week without a connection arrives as a
+week of correctly dated history at once; nothing is recorded about reading; only what reached
+this Device.
 
 **Anchor.** Activity reduces from the same `CollectionView` the Gallery already holds, plus the
 `Envelope`s retained in memory since process start. No new query path, no new storage.
@@ -147,7 +148,7 @@ record log — that is W2, and it is what makes conflicts absorbable at all.
 **Mistake to build early.** A repair engine. A "resolve conflicts" button that merges or rewrites
 logs destroys the append-only property the whole metadata design rests on. Also: a storage
 manager (pruning the version archive is the engine's `cleanoutDays`, not kith's business), and a
-health *score* — a number that averages "0 Members online" with "a forked log" is worse than the
+health *score* — a number that averages "0 Members connected" with "a forked log" is worse than the
 two sentences it replaces.
 
 ### 4. Automation — v0.2 (I) and v0.3 (II)
