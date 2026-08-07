@@ -33,6 +33,20 @@ impl PersonId {
     }
 }
 
+/// Read an id back from something kith itself wrote — a Circle descriptor's
+/// `founder_person`, a Favourites line, a `--json` handle round-tripping.
+///
+/// It validates nothing on purpose: the id is whatever the file said, and a
+/// reader that rejected an id a peer's newer kith minted would drop that
+/// Person's attribution rather than show it. Minting is [`PersonId::generate`]
+/// and stays that way — this is the read path, not a second way to become
+/// somebody.
+impl From<String> for PersonId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 impl fmt::Display for PersonId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -59,6 +73,15 @@ impl ItemId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Read an Item id back from local state kith wrote — the Favourites log, the
+/// seen set. Same rule as [`PersonId`]'s: the read path validates nothing, and
+/// minting stays [`ItemId::generate`].
+impl From<String> for ItemId {
+    fn from(s: String) -> Self {
+        Self(s)
     }
 }
 

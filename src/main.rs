@@ -70,25 +70,32 @@ enum Command {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    // Every verb returns its own process exit code (cli-tui.md §2). This
+    // function's whole job is to pick the one that runs — it decides nothing
+    // about the domain, which is why there is no logic between here and the
+    // command modules.
     let code = match cli.command {
         Some(Command::Doctor) => doctor().await,
         Some(Command::Init { name }) => init(name),
-        Some(Command::Create { .. })
-        | Some(Command::Join { .. })
-        | Some(Command::Invite { .. })
-        | Some(Command::Approve { .. })
-        | Some(Command::Reject { .. })
-        | Some(Command::Add { .. })
-        | Some(Command::List { .. })
-        | Some(Command::Status) => {
-            eprintln!("not implemented yet — see docs/spec/ for the behaviour this must match");
-            EX_USAGE
+        Some(Command::Create { name, path, adopt }) => {
+            cmd::create::run(&name, path.as_deref(), adopt).await
         }
+        Some(Command::Join { code }) => cmd::membership::join(&code).await,
+        Some(Command::Invite { new }) => cmd::membership::invite(new).await,
+        Some(Command::Approve { device }) => cmd::membership::approve(device.as_deref()).await,
+        Some(Command::Reject { device }) => cmd::membership::reject(device.as_deref()).await,
+        Some(Command::Add { paths }) => {
+            if paths.is_empty() {
+                eprintln!("kith add <paths…> — what should join the Collection?");
+                EX_USAGE
+            } else {
+                cmd::add::run(&paths).await
+            }
+        }
+        Some(Command::List { subject }) => cmd::report::list(subject.as_deref(), cli.json).await,
+        Some(Command::Status) => cmd::report::status(cli.json).await,
         // Bare `kith` opens the TUI.
-        None => {
-            eprintln!("the TUI is not implemented yet; try `kith doctor`");
-            EX_USAGE
-        }
+        None => tui::run().await,
     };
     std::process::exit(code);
 }

@@ -118,6 +118,12 @@ impl ApplyBackend for Feh {
     }
 }
 
+/// Single-quote for `sh`, the only form with no escapes inside it: a literal
+/// quote is closed, escaped and reopened.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 fn run(cmd: &mut Command) -> Result<(), ActionError> {
     match cmd.output() {
         Ok(out) if out.status.success() => Ok(()),
@@ -253,7 +259,19 @@ impl Provider for WallpaperProvider {
         let target = target.cloned().unwrap_or(ApplyTarget::AllMonitors);
 
         if let Some(template) = &self.custom_command {
-            let filled = template.replace("{path}", &path.display().to_string());
+            // The two placeholders cli-tui.md §8.2 fixes. `{item}` is always
+            // quoted by kith, because the template is run through a shell and the
+            // Item's name came from a peer: a wallpaper called `a; rm -rf ~` must
+            // arrive at that shell as one argument, not as two commands.
+            let filled = template
+                .replace("{item}", &shell_quote(&path.display().to_string()))
+                .replace(
+                    "{target}",
+                    &shell_quote(match &target {
+                        ApplyTarget::Monitor(name) => name.as_str(),
+                        ApplyTarget::AllMonitors => "",
+                    }),
+                );
             run(Command::new("sh").arg("-c").arg(&filled))?;
             return Ok(ActionOutcome {
                 message: "applied via the configured command".into(),
@@ -293,6 +311,24 @@ mod tests {
         let p = WallpaperProvider::default();
         let path = candidate("notes.txt");
         assert!(!p.claims(&ImportCandidate { path: &path, mime: None }));
+    }
+
+    #[test]
+    fn a_custom_command_gets_the_two_placeholders_the_config_documents() {
+        // cli-tui.md §8.2 fixes `{item}` and `{target}`; a template written from
+        // the spec has to be filled, not left with the literal braces in it.
+        let p = WallpaperProvider::new(Some("set {item} on {target}".into()));
+        assert!(p.custom_command.is_some());
+        let filled = "set {item} on {target}"
+            .replace("{item}", &shell_quote("/tmp/a b.png"))
+            .replace("{target}", &shell_quote("DP-1"));
+        assert_eq!(filled, "set '/tmp/a b.png' on 'DP-1'");
+    }
+
+    #[test]
+    fn a_name_a_peer_chose_cannot_become_a_second_shell_command() {
+        assert_eq!(shell_quote("a; rm -rf ~"), "'a; rm -rf ~'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
     #[test]
