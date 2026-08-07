@@ -103,6 +103,9 @@ pub fn encode(ticket: &InviteTicket) -> String {
     push_field(&mut payload, ticket.circle.0.as_bytes());
     push_field(&mut payload, ticket.steward_device.0.as_bytes());
     payload.extend_from_slice(&ticket.expires_at.to_be_bytes());
+    if let Some(address) = &ticket.address {
+        push_field(&mut payload, address.as_bytes());
+    }
 
     let crc = crc32(&payload);
     payload.extend_from_slice(&crc.to_be_bytes());
@@ -192,6 +195,7 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
     let circle = reader.field()?;
     let steward_device = reader.field()?;
     let expires_at = reader.u64()?;
+    let address = if reader.done() { None } else { Some(reader.field()?) };
     if !reader.done() {
         return Err(InviteError::Malformed);
     }
@@ -207,6 +211,7 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
         circle: CircleId(circle),
         steward_device: DeviceId(steward_device),
         expires_at,
+        address,
     })
 }
 
@@ -352,10 +357,32 @@ mod tests {
 
     fn ticket() -> InviteTicket {
         InviteTicket {
+            address: None,
             circle: CircleId(CIRCLE.into()),
             steward_device: DeviceId(DEVICE.into()),
             expires_at: EXPIRES,
         }
+    }
+
+    #[test]
+    fn an_address_hint_survives_the_round_trip() {
+        let hinted = InviteTicket {
+            address: Some("tcp://192.168.1.5:22000".into()),
+            ..ticket()
+        };
+        let back = decode_at(&encode(&hinted), EXPIRES as i64 - 60).expect("hinted code decodes");
+        assert_eq!(back.address.as_deref(), Some("tcp://192.168.1.5:22000"));
+        assert_eq!(back.circle.0, CIRCLE);
+        assert_eq!(back.steward_device.0, DEVICE);
+    }
+
+    #[test]
+    fn a_code_without_a_hint_carries_none_and_stays_shorter() {
+        let plain = encode(&ticket());
+        let hinted = encode(&InviteTicket { address: Some("tcp://10.0.0.2:22000".into()), ..ticket() });
+        assert!(plain.len() < hinted.len(), "the hint is what costs the extra length");
+        let back = decode_at(&plain, EXPIRES as i64 - 60).expect("plain code decodes");
+        assert_eq!(back.address, None);
     }
 
     /// Replace the `nth` symbol of the body with a different one — the paste

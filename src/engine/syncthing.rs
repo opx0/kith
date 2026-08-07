@@ -252,6 +252,25 @@ impl SyncthingEngine {
         }
     }
 
+    /// Pin an address the Invite carried, so a joiner can reach the Steward on a
+    /// network where discovery does not.
+    ///
+    /// Added alongside `dynamic` rather than replacing it: the hint is what the
+    /// Steward's Device looked like when the code was printed, and discovery has
+    /// to keep working when that stops being true.
+    async fn set_device_address(&self, device: &DeviceId, address: &str) -> Result<(), SyncError> {
+        let path = format!("/rest/config/devices/{}", escape(&device.0));
+        let mut entry = self.get(&path).await?;
+        let Some(addresses) = entry.get_mut("addresses").and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        if addresses.iter().any(|a| a.as_str() == Some(address)) {
+            return Ok(());
+        }
+        addresses.push(Value::String(address.to_string()));
+        self.put(&path, &entry).await.map(|_| ())
+    }
+
     /// Seed a Circle's ignore patterns so per-Device scratch never replicates.
     async fn seed_ignores(&self, circle: &CircleId) -> Result<(), SyncError> {
         self.post(
@@ -356,6 +375,9 @@ impl SyncEngine for SyncthingEngine {
     /// explicit, so the joiner chooses the root and no global default is touched.
     async fn begin_join(&self, invite: &InviteTicket) -> Result<(), SyncError> {
         self.ensure_device(&invite.steward_device, "").await?;
+        if let Some(address) = &invite.address {
+            self.set_device_address(&invite.steward_device, address).await?;
+        }
         // The Steward's Device is this Device's one introducer: it is where the
         // rest of the Circle's Devices will be learned from.
         self.set_introducer(&invite.steward_device, true).await

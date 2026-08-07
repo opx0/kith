@@ -203,6 +203,10 @@ pub struct InviteTicket {
     pub circle: CircleId,
     pub steward_device: DeviceId,
     pub expires_at: u64,
+    /// An address hint for the Steward's Device, present only when the Steward
+    /// asked for one. Discovery finds most Devices; this is for the networks
+    /// where it does not.
+    pub address: Option<String>,
 }
 
 /// Opaque replay token for the change feed.

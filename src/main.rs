@@ -52,6 +52,10 @@ enum Command {
     Invite {
         #[arg(long)]
         new: bool,
+        /// Carry an address for this Device, for networks where discovery does
+        /// not reach. Example: --address tcp://192.168.1.5:22000
+        #[arg(long, value_name = "ADDR")]
+        address: Option<String>,
     },
     /// Admit a knocking Device.
     Approve { device: Option<String> },
@@ -81,7 +85,9 @@ async fn main() {
             cmd::create::run(&name, path.as_deref(), adopt).await
         }
         Some(Command::Join { code }) => cmd::membership::join(&code).await,
-        Some(Command::Invite { new }) => cmd::membership::invite(new).await,
+        Some(Command::Invite { new, address }) => {
+            cmd::membership::invite(new, address.as_deref()).await
+        }
         Some(Command::Approve { device }) => cmd::membership::approve(device.as_deref()).await,
         Some(Command::Reject { device }) => cmd::membership::reject(device.as_deref()).await,
         Some(Command::Add { paths }) => {

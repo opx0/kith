@@ -68,7 +68,7 @@ const DISMISSED: &str = "dismissed.json";
 /// `new` supersedes an open window instead of reprinting it. Reprinting is the
 /// default because losing the code costs nothing and must not cost the Person
 /// their remaining window either.
-pub async fn invite(new: bool) -> i32 {
+pub async fn invite(new: bool, address: Option<&str>) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
 
     let engine = reach_engine().await;
@@ -126,6 +126,7 @@ pub async fn invite(new: bool) -> i32 {
         circle: CircleId(descriptor.id.clone()),
         steward_device: DeviceId(descriptor.founder_device.clone()),
         expires_at: window.expires_at.max(0) as u64,
+        address: address.map(str::to_string),
     };
     print_invite(&circle.name, &invite::encode(&ticket), &window, unix, reprinted);
 
@@ -2029,6 +2030,7 @@ mod tests {
     fn the_printed_code_carries_the_window_it_was_minted_under() {
         let w = window(1_786_000_000, WindowState::Open);
         let ticket = InviteTicket {
+            address: None,
             circle: CircleId(w.circle.clone()),
             steward_device: DeviceId(ANA_DEVICE.into()),
             expires_at: w.expires_at as u64,
