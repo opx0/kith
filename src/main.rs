@@ -1,9 +1,15 @@
 //! kith — local-first, peer-to-peer collections shared with the people you trust.
 
+mod cmd;
+mod config;
 mod domain;
 mod engine;
+mod hash;
 mod identity;
+mod invite;
 mod provider;
+mod store;
+mod tui;
 
 use clap::{Parser, Subcommand};
 
