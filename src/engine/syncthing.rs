@@ -407,6 +407,11 @@ impl SyncEngine for SyncthingEngine {
         Ok(map_pending_devices(&v))
     }
 
+    async fn pending_circles(&self) -> Result<Vec<CircleOffer>, SyncError> {
+        let v = self.get("/rest/cluster/pending/folders").await?;
+        Ok(map_pending_folders(&v))
+    }
+
     /// Admit a knocking Device into a Circle.
     ///
     /// Two writes, both scoped: an entry for the Device if it has none, and the
@@ -909,6 +914,31 @@ fn map_pending_devices(v: &Value) -> Vec<JoinRequest> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn map_pending_folders(v: &Value) -> Vec<CircleOffer> {
+    let Some(pending) = v.as_object() else {
+        return Vec::new();
+    };
+    pending
+        .iter()
+        .flat_map(|(circle, entry)| {
+            entry
+                .get("offeredBy")
+                .and_then(Value::as_object)
+                .map(|offers| {
+                    offers
+                        .iter()
+                        .map(|(device, offer)| CircleOffer {
+                            circle: CircleId(circle.clone()),
+                            from: DeviceId(device.clone()),
+                            label: either(offer, "label", "Label").unwrap_or_default(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// The label the offering Device gave a Circle it is offering back.

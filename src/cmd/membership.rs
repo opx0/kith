@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config;
 use crate::engine::syncthing::{Credentials, SyncthingEngine};
-use crate::engine::{CircleId, DeviceId, InviteTicket, JoinRequest, SyncEngine, SyncError};
+use crate::engine::{CircleId, CircleOffer, DeviceId, InviteTicket, JoinRequest, SyncEngine, SyncError};
 use crate::identity::{self, Identity};
 use crate::invite::{self, InviteError};
 use crate::store::claims;
@@ -326,6 +326,12 @@ pub async fn join(code: &str) -> i32 {
         return refuse_engine(&e);
     }
 
+    if let Some(offer) = offered_back(&engine, &ticket).await
+        && let Some(root) = &root
+    {
+        return place_circle(&engine, &offer, root, &me).await;
+    }
+
     match &repeat {
         Some(k) => {
             let waited = since(&k.first_knock_at)
@@ -353,6 +359,61 @@ pub async fn join(code: &str) -> i32 {
 /// The Circle's *name* is not in the ticket — it arrives with `.kith/circle.toml`
 /// on the first sync — so the id names the directory. It is unique by
 /// construction, which the name is not (spec §4.11).
+async fn offered_back(engine: &SyncthingEngine, ticket: &InviteTicket) -> Option<CircleOffer> {
+    engine
+        .pending_circles()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|o| o.circle.0 == ticket.circle.0)
+}
+
+async fn place_circle(
+    engine: &SyncthingEngine,
+    offer: &CircleOffer,
+    root: &Path,
+    me: &Identity,
+) -> i32 {
+    let circle = match engine.complete_join(offer, root).await {
+        Ok(c) => c,
+        Err(e) => return refuse_engine(&e),
+    };
+
+    let device = match engine.local_device().await {
+        Ok(d) => d.0,
+        Err(e) => return refuse_engine(&e),
+    };
+    let now = jiff::Timestamp::now().to_string();
+    if let Err(e) = claims::publish(&circle.root, &device, me, &now) {
+        eprintln!("Joined, but this Device could not publish its Membership claim: {e}");
+        eprintln!("Other Members will see an unclaimed Device until it can.");
+        return EX_FAIL;
+    }
+
+    mark_knock_joined(&offer.circle);
+
+    let name = if circle.name.is_empty() { &offer.label } else { &circle.name };
+    println!("Joined {} at {}.", display_name(name, &offer.circle), circle.root.display());
+    println!();
+    println!("Content arrives as it syncs. Nothing touches your screen until you press Apply.");
+    println!("Open kith to watch it land.");
+    EX_OK
+}
+
+fn display_name<'a>(name: &'a str, circle: &'a CircleId) -> &'a str {
+    if name.is_empty() { &circle.0 } else { name }
+}
+
+fn mark_knock_joined(circle: &CircleId) {
+    let Some(dir) = state_dir() else { return };
+    let path = dir.join(KNOCKS);
+    let mut knocks: Vec<Knock> = read_state(&path);
+    for knock in knocks.iter_mut().filter(|k| k.circle == circle.0) {
+        knock.state = KnockState::Joined;
+    }
+    save(&path, &knocks);
+}
+
 fn join_root(circle: &CircleId) -> Option<PathBuf> {
     circles_dir().map(|d| d.join(circle.0.to_lowercase()))
 }

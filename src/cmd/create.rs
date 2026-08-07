@@ -1116,6 +1116,10 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn pending_circles(&self) -> Result<Vec<CircleOffer>, SyncError> {
+            Ok(Vec::new())
+        }
+
         async fn admit(&self, _c: &CircleId, _r: &JoinRequest) -> Result<(), SyncError> {
             Err(SyncError::NotFound)
         }

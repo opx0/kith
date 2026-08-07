@@ -65,6 +65,9 @@ pub trait SyncEngine: Send + Sync + 'static {
     /// Steward side: Devices currently knocking.
     fn pending_joins(&self) -> impl Future<Output = Result<Vec<JoinRequest>, SyncError>> + Send;
 
+    /// Joiner side: Circles a Steward has offered back but this Device has not placed.
+    fn pending_circles(&self) -> impl Future<Output = Result<Vec<CircleOffer>, SyncError>> + Send;
+
     /// Steward side: admit a knocking Device. Deliberate, never automatic.
     fn admit(
         &self,
