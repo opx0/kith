@@ -1,7 +1,7 @@
 //! The one configuration file — `config.toml`, and nothing else.
 //!
 //! Three rules the whole surface leans on: a missing file is not an error, an
-//! unknown key is a warning, and a wrong type is fatal. kith reads this file and
+//! unknown key is a warning, and a wrong type is fatal. wallsync reads this file and
 //! never writes it.
 
 use std::collections::BTreeMap;
@@ -22,11 +22,11 @@ pub const APPLY_BACKENDS: &[&str] =
 
 /// The settings a Person can hold.
 ///
-/// Deliberately not derived `Serialize`: kith never writes this file back.
+/// Deliberately not derived `Serialize`: wallsync never writes this file back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     /// The apply backend the Person named, or `None` when they left the choice
-    /// to kith.
+    /// to wallsync.
     ///
     /// `backend = "auto"` normalises to `None` — auto *is* the absence of a
     /// choice, and a surface that has to special-case the string will forget to.
@@ -79,11 +79,11 @@ impl Config {
 #[derive(Clone, Debug, Default)]
 pub struct Loaded {
     pub config: Config,
-    /// Where kith looked. `None` only when this Device has no config directory.
+    /// Where wallsync looked. `None` only when this Device has no config directory.
     pub path: Option<PathBuf>,
     /// Whether a file was actually there.
     pub present: bool,
-    /// Dotted paths of keys kith does not know, in file order.
+    /// Dotted paths of keys wallsync does not know, in file order.
     pub unknown_keys: Vec<String>,
     /// `output name → friendly label`, aligned with [`Config::monitors`].
     pub monitor_labels: Vec<(String, String)>,
@@ -113,7 +113,7 @@ impl Loaded {
     }
 }
 
-/// Why kith will not run on this file. Every variant is exit [`EXIT_CONFIG`].
+/// Why wallsync will not run on this file. Every variant is exit [`EXIT_CONFIG`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{path} could not be read: {source}")]
@@ -126,7 +126,7 @@ pub enum ConfigError {
     /// own, which names the line.
     #[error("{path} is not valid configuration:\n{message}")]
     Parse { path: PathBuf, message: String },
-    /// It parses, but kith cannot honour it — and will not guess.
+    /// It parses, but wallsync cannot honour it — and will not guess.
     #[error("{path}: {key} {message}")]
     Invalid {
         path: PathBuf,
@@ -150,11 +150,11 @@ impl ConfigError {
     pub fn fix(&self) -> Option<String> {
         match self {
             ConfigError::Unreadable { path, .. } => Some(format!(
-                "Make {} readable, or remove it — every key is optional and kith runs with no config at all.",
+                "Make {} readable, or remove it — every key is optional and wallsync runs with no config at all.",
                 path.display()
             )),
             ConfigError::Parse { .. } => Some(
-                "Fix that value, or delete the key — every key is optional and kith runs with no config at all."
+                "Fix that value, or delete the key — every key is optional and wallsync runs with no config at all."
                     .into(),
             ),
             ConfigError::Invalid { fix, .. } => Some(fix.clone()),
@@ -162,21 +162,21 @@ impl ConfigError {
     }
 }
 
-/// `$KITH_CONFIG`, else `$XDG_CONFIG_HOME/kith/config.toml`.
+/// `$WALLSYNC_CONFIG`, else `$XDG_CONFIG_HOME/wallsync/config.toml`.
 ///
 /// `None` means this Device has no config directory, which just means defaults.
 pub fn path() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("KITH_CONFIG")
+    if let Some(explicit) = std::env::var_os("WALLSYNC_CONFIG")
         && !explicit.is_empty()
     {
         return Some(PathBuf::from(explicit));
     }
-    directories::BaseDirs::new().map(|b| b.config_dir().join("kith/config.toml"))
+    directories::BaseDirs::new().map(|b| b.config_dir().join("wallsync/config.toml"))
 }
 
 /// The settings, or defaults. A missing file is not an error.
 ///
-/// Unknown keys are warned about on stderr and ignored; a file kith cannot
+/// Unknown keys are warned about on stderr and ignored; a file wallsync cannot
 /// understand ends the process with [`EXIT_CONFIG`]. Callers that must render
 /// the failure themselves — or that are already inside the alternate screen —
 /// use [`inspect`].
@@ -316,7 +316,7 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
         return Err(ConfigError::Invalid {
             path: path.to_path_buf(),
             key: "provider.wallpaper.backend".into(),
-            message: format!("is {backend:?}, which kith does not know"),
+            message: format!("is {backend:?}, which wallsync does not know"),
             fix: format!("Use one of: {}.", APPLY_BACKENDS.join(", ")),
         });
     }
@@ -394,7 +394,7 @@ fn non_empty(path: &Path, key: &str, value: Option<String>) -> Result<Option<Str
 }
 
 /// One known key. `open` marks a table whose keys are the Person's own names,
-/// where kith has no list to check anything against.
+/// where wallsync has no list to check anything against.
 struct Key {
     name: &'static str,
     children: &'static [Key],
@@ -472,7 +472,7 @@ mod tests {
     use super::*;
 
     fn at(text: &str) -> Result<Loaded, ConfigError> {
-        parse(text, Path::new("/nowhere/kith/config.toml"))
+        parse(text, Path::new("/nowhere/wallsync/config.toml"))
     }
 
     fn ok(text: &str) -> Loaded {
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_not_an_error() {
-        let scratch = std::env::temp_dir().join("kith-config-tests");
+        let scratch = std::env::temp_dir().join("wallsync-config-tests");
         std::fs::create_dir_all(&scratch).unwrap();
         let missing = scratch.join("there-is-no-config-here.toml");
         let _ = std::fs::remove_file(&missing);
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn an_unknown_backend_name_is_refused_rather_than_ignored() {
         let err = at("[provider.wallpaper]\nbackend = \"wallutils\"\n")
-            .expect_err("kith cannot honour a backend it does not have");
+            .expect_err("wallsync cannot honour a backend it does not have");
         assert_eq!(err.code(), "config.invalid");
         assert!(err.fix().unwrap().contains("swww"));
     }
@@ -605,7 +605,7 @@ mod tests {
             [provider.wallpaper.custom]
             apply = "echo {item}"
         "#)
-        .expect_err("kith will not guess which one was meant");
+        .expect_err("wallsync will not guess which one was meant");
         assert_eq!(err.code(), "config.invalid");
     }
 
@@ -625,7 +625,7 @@ mod tests {
         );
         assert!(
             loaded.unknown_keys.is_empty(),
-            "output names are the Person's, not keys kith knows"
+            "output names are the Person's, not keys wallsync knows"
         );
     }
 

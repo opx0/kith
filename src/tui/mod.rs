@@ -61,7 +61,7 @@ const EX_OK: i32 = 0;
 const EX_USAGE: i32 = 64;
 const EX_INTERNAL: i32 = 70;
 
-/// The Gallery cannot draw below this, and kith refuses before entering the
+/// The Gallery cannot draw below this, and wallsync refuses before entering the
 /// alternate screen rather than painting a message that vanishes with it.
 const MIN_W: u16 = 60;
 const MIN_H: u16 = 18;
@@ -85,14 +85,14 @@ const RELOAD_COALESCE: Duration = Duration::from_millis(250);
 
 // ── entry ────────────────────────────────────────────────────────────
 
-/// Bare `kith`. Returns the process exit code; never calls `exit` itself, so the
+/// Bare `wallsync`. Returns the process exit code; never calls `exit` itself, so the
 /// terminal guard runs.
 pub async fn run() -> i32 {
     let me = match crate::identity::load() {
         Ok(Some(id)) => id,
         Ok(None) => {
             eprintln!(
-                "Run kith init first — kith needs to know your name before it can show you a Circle."
+                "Run wallsync init first — wallsync needs to know your name before it can show you a Circle."
             );
             return EX_USAGE;
         }
@@ -104,7 +104,7 @@ pub async fn run() -> i32 {
 
     match crossterm::terminal::size() {
         Ok((w, h)) if w < MIN_W || h < MIN_H => {
-            eprintln!("kith needs at least {MIN_W}×{MIN_H}; this terminal is {w}×{h}.");
+            eprintln!("wallsync needs at least {MIN_W}×{MIN_H}; this terminal is {w}×{h}.");
             return EX_USAGE;
         }
         Ok(_) => {}
@@ -127,7 +127,7 @@ pub async fn run() -> i32 {
         }
     };
 
-    // Neither is required: a Circle kith has a root for is browsable with the
+    // Neither is required: a Circle wallsync has a root for is browsable with the
     // daemon stopped.
     let engine = engine_from(&config.config).map(Arc::new);
     let circles = discover_circles(engine.as_deref()).await;
@@ -233,8 +233,8 @@ async fn discover_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<CircleHandle
             if !root.is_dir() || out.iter().any(|c| c.root == root) {
                 continue;
             }
-            // Only a directory kith wrote a Circle descriptor into is a Circle;
-            // guessing at the rest would be kith inventing Membership.
+            // Only a directory wallsync wrote a Circle descriptor into is a Circle;
+            // guessing at the rest would be wallsync inventing Membership.
             let Ok(Some(d)) = descriptors::read_circle(&root) else {
                 continue;
             };
@@ -247,7 +247,7 @@ async fn discover_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<CircleHandle
 }
 
 fn default_circles_dir() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|b| b.data_dir().join("kith/circles"))
+    directories::BaseDirs::new().map(|b| b.data_dir().join("wallsync/circles"))
 }
 
 // ── what one Circle's tree says ──────────────────────────────────────
@@ -849,7 +849,7 @@ impl<E: SyncEngine> App<E> {
                 MembersAction::Approve(r) => Some(Cmd::Approve(r)),
                 MembersAction::Reject(r) => Some(Cmd::Reject(r)),
                 MembersAction::Invite => Some(Cmd::Refuse(
-                    "Invites are printed by `kith invite` — a code has to leave this Device by a channel you already trust.".into(),
+                    "Invites are printed by `wallsync invite` — a code has to leave this Device by a channel you already trust.".into(),
                 )),
                 MembersAction::Leave => {
                     self.confirm_leave();
@@ -1095,7 +1095,7 @@ impl<E: SyncEngine> App<E> {
                 } else {
                     "The bytes are not on this Device; the record is removed all the same.".into()
                 },
-                "kith cannot undo it. A Member who still holds an older copy can restore it."
+                "wallsync cannot undo it. A Member who still holds an older copy can restore it."
                     .into(),
             ],
             typed: None,
@@ -1291,7 +1291,7 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// Local and silent: there is nothing to deliver a "no", and kith will not
+    /// Local and silent: there is nothing to deliver a "no", and wallsync will not
     /// pretend it sent one.
     fn reject(&mut self, request: JoinRequest) {
         let Some(circle) = self.active_circle().cloned() else { return };
@@ -1516,7 +1516,7 @@ impl<E: SyncEngine> App<E> {
                 person.id.clone(),
                 person.display_name.clone(),
                 role,
-                // kith holds no connection to itself and will not pretend to.
+                // wallsync holds no connection to itself and will not pretend to.
                 if is_you { Presence::Unknown } else { presence_of(&person.devices) },
             );
             view.is_you = is_you;
@@ -1603,10 +1603,10 @@ impl<E: SyncEngine> App<E> {
         if !self.engine_reachable {
             screen = screen.with_notice(ENGINE_DOWN.to_string());
         }
-        // `kith invite` is the CLI's; the screen says so rather than offering a
+        // `wallsync invite` is the CLI's; the screen says so rather than offering a
         // key that does nothing.
         screen = screen.invite_unavailable(
-            "run `kith invite` — a code has to leave this Device by a channel you already trust",
+            "run `wallsync invite` — a code has to leave this Device by a channel you already trust",
         );
         self.members = screen;
     }
@@ -1756,8 +1756,8 @@ impl<E: SyncEngine> App<E> {
     fn draw_title(&mut self, frame: &mut Frame, area: Rect) {
         let name = self.active_circle().map(|c| c.name.clone());
         let left = match &name {
-            Some(n) => format!("kith · {n}"),
-            None => "kith".to_string(),
+            Some(n) => format!("wallsync · {n}"),
+            None => "wallsync".to_string(),
         };
         let mut right = self.gallery.title_row();
         let knocks = self.members.pending_count();
@@ -1932,7 +1932,7 @@ impl<E: SyncEngine> App<E> {
             "q                  back, or quit at the Gallery",
             "Ctrl-C             quit          Ctrl-Z  suspend",
             "",
-            "Roles are an agreement, not a lock. Admission is the only gate kith has.",
+            "Roles are an agreement, not a lock. Admission is the only gate wallsync has.",
             "",
             "q close",
         ]
@@ -1997,14 +1997,14 @@ impl<E: SyncEngine> App<E> {
 
 // ── the app's own rebuildable state ──────────────────────────────────
 
-/// `$XDG_STATE_HOME/kith/state.toml`. Rebuildable: deleting it costs a switcher
+/// `$XDG_STATE_HOME/wallsync/state.toml`. Rebuildable: deleting it costs a switcher
 /// press and a set of dots, and nothing else.
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_circle: Option<String>,
     /// Remembered so a Delete still works with the daemon stopped: the log is
-    /// keyed by Device and kith mints no id of its own.
+    /// keyed by Device and wallsync mints no id of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<String>,
     /// Item ids this Device has shown the Person, per Circle. Never synced: an
@@ -2016,7 +2016,7 @@ struct State {
 impl State {
     fn path() -> Option<PathBuf> {
         let base = directories::BaseDirs::new()?;
-        Some(base.state_dir().unwrap_or_else(|| base.data_dir()).join("kith/state.toml"))
+        Some(base.state_dir().unwrap_or_else(|| base.data_dir()).join("wallsync/state.toml"))
     }
 
     fn load() -> Self {
@@ -2033,7 +2033,7 @@ impl State {
         // Staged and renamed: a crash mid-write would otherwise truncate the
         // file, and `load` treats an unreadable one as Default — silently
         // forgetting every Item this Person had seen.
-        let tmp = path.with_extension("toml.kith-tmp");
+        let tmp = path.with_extension("toml.wallsync-tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
@@ -2043,7 +2043,7 @@ impl State {
 // ── favourites: local, private, never announced ──────────────────────
 
 fn favourites_path() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|b| b.data_dir().join("kith/favourites.jsonl"))
+    directories::BaseDirs::new().map(|b| b.data_dir().join("wallsync/favourites.jsonl"))
 }
 
 /// The effective set is the last operation per `(circle, item)`; the log is
@@ -2160,14 +2160,14 @@ mod tests {
 
     #[test]
     fn the_status_row_never_overflows_its_width() {
-        let line = row("kith · a very long Circle name indeed", "42 Items · 3 unseen", 30);
+        let line = row("wallsync · a very long Circle name indeed", "42 Items · 3 unseen", 30);
         assert_eq!(line.to_string().chars().count(), 30);
     }
 
     #[test]
     fn the_status_row_pads_to_the_full_width() {
-        let line = row("kith", "ok", 20);
-        assert_eq!(line.to_string(), "kith              ok");
+        let line = row("left", "ok", 20);
+        assert_eq!(line.to_string(), "left              ok");
     }
 
     #[test]
@@ -2179,11 +2179,11 @@ mod tests {
 
     #[test]
     fn the_arriving_walk_skips_dot_entries_and_reserved_paths() {
-        let dir = std::env::temp_dir().join(format!("kith-tui-walk-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wallsync-tui-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join(".kith/members")).unwrap();
+        std::fs::create_dir_all(dir.join(".wallsync/members")).unwrap();
         std::fs::write(dir.join("sunset.png"), b"x").unwrap();
-        std::fs::write(dir.join(".kith/members/a.toml"), b"x").unwrap();
+        std::fs::write(dir.join(".wallsync/members/a.toml"), b"x").unwrap();
         std::fs::write(dir.join("dawn.png.sync-conflict-1.png"), b"x").unwrap();
 
         let found = arriving_paths(&dir, &["*.sync-conflict-*"], &[]);
@@ -2193,7 +2193,7 @@ mod tests {
 
     #[test]
     fn bytes_already_bound_to_an_item_are_not_arriving() {
-        let dir = std::env::temp_dir().join(format!("kith-tui-bound-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wallsync-tui-bound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sunset.png"), b"x").unwrap();
@@ -2217,7 +2217,7 @@ mod tests {
 {"k":"fav","circle":"c1","item":"B"}
 {"k":"unfav","circle":"c1","item":"A"}
 {"k":"fav","circle":"c2","item":"Z"}"#;
-        let dir = std::env::temp_dir().join(format!("kith-tui-fav-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wallsync-tui-fav-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("favourites.jsonl");
@@ -2249,7 +2249,7 @@ mod tests {
         assert_eq!(base64(b"a"), "YQ==");
         assert_eq!(base64(b"ab"), "YWI=");
         assert_eq!(base64(b"abc"), "YWJj");
-        assert_eq!(base64(b"/home/ana/kith/walls/sunset.png").len() % 4, 0);
+        assert_eq!(base64(b"/home/ana/wallsync/walls/sunset.png").len() % 4, 0);
     }
 
     #[test]
@@ -2261,15 +2261,15 @@ mod tests {
     #[test]
     fn state_round_trips_through_toml() {
         let mut state = State {
-            last_circle: Some("kith-abc".into()),
+            last_circle: Some("wallsync-abc".into()),
             device: Some("AAAA-BBBB".into()),
             ..State::default()
         };
-        state.seen.insert("kith-abc".into(), vec!["01H".into()]);
+        state.seen.insert("wallsync-abc".into(), vec!["01H".into()]);
         let text = toml::to_string_pretty(&state).unwrap();
         let back: State = toml::from_str(&text).unwrap();
-        assert_eq!(back.last_circle.as_deref(), Some("kith-abc"));
-        assert_eq!(back.seen["kith-abc"], vec!["01H".to_string()]);
+        assert_eq!(back.last_circle.as_deref(), Some("wallsync-abc"));
+        assert_eq!(back.seen["wallsync-abc"], vec!["01H".to_string()]);
     }
 
     /// The consent invariant, asserted against the source rather than promised.

@@ -7,9 +7,9 @@
 
 use crate::engine::{CircleId, DeviceId, InviteTicket};
 
-/// The literal prefix, so a code from a future kith is detectable *before*
+/// The literal prefix, so a code from a future wallsync is detectable *before*
 /// anything is decoded.
-const PREFIX: &str = "KITH";
+const PREFIX: &str = "WALLSYNC";
 
 /// Format version. Single digit by construction — [`encode`] writes one
 /// character and [`decode`] reads one.
@@ -31,7 +31,7 @@ const CLOCK_SKEW_GRACE_SECS: i64 = 300;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InviteError {
     /// Not an invite code at all, or damaged past recognition.
-    #[error("that is not a kith invite code")]
+    #[error("that is not a wallsync invite code")]
     Malformed,
     /// It looks like a code and does not add up.
     #[error("the invite code arrived damaged — check nothing was cut off")]
@@ -39,8 +39,8 @@ pub enum InviteError {
     /// A well-formed code whose moment has passed.
     #[error("this invite has expired")]
     Expired,
-    /// A code from a kith that speaks a format this one does not.
-    #[error("this invite code was made by a newer kith")]
+    /// A code from a wallsync that speaks a format this one does not.
+    #[error("this invite code was made by a newer wallsync")]
     WrongVersion,
 }
 
@@ -108,7 +108,7 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
         .ok_or(InviteError::Malformed)?;
 
     // The version sits outside the base32 body, so its confusables are undone by
-    // hand here — "kith one" is typed back as `KITHL` often enough.
+    // hand here — "wallsync one" is typed back as `WALLSYNCL` often enough.
     let mut chars = rest.chars();
     let version = match chars.next().ok_or(InviteError::Malformed)? {
         'I' | 'L' => '1',
@@ -285,7 +285,7 @@ fn crc32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
-    const CIRCLE: &str = "kith-7QM4XKC2";
+    const CIRCLE: &str = "wallsync-7QM4XKC2";
     /// Shaped like the seam's opaque Device handle, in an alphabet of its own
     /// that includes letters Crockford leaves out.
     const DEVICE: &str = "CVX4DU36QK7WN2ZPB5YHJFA3ETMRS6LXG4VC8DKQ9WNP2ZY7KQ4X";
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn a_ticket_survives_the_round_trip() {
         let code = encode(&ticket());
-        assert!(code.starts_with("KITH1-"), "{code}");
+        assert!(code.starts_with("WALLSYNC1-"), "{code}");
 
         let back = decode_at(&code, NOW).expect("round trip");
         assert_eq!(back.circle.0, CIRCLE);
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn a_code_read_aloud_and_typed_back_still_decodes() {
         // Lowercase, hyphens lost, a wrapped line, and O/I/L substituted —
-        // including in the prefix, which is typed back as `kithl`.
+        // including in the prefix, which is typed back as `wallsyncl`.
         let code = encode(&ticket());
         let mangled: String = code
             .chars()
@@ -386,7 +386,7 @@ mod tests {
             })
             .collect();
         let mangled = format!("{}\n  {}", &mangled[..20], &mangled[20..]);
-        assert!(mangled.starts_with("kithl"));
+        assert!(mangled.starts_with("wallsyncl"));
 
         let back = decode_at(&mangled, NOW).expect("confusables are undone");
         assert_eq!(back.circle.0, CIRCLE);
@@ -424,8 +424,8 @@ mod tests {
             "",
             "hello",
             "https://example.invalid/join",
-            "KITH",
-            "KITHX-ABCD",
+            "WALLSYNC",
+            "WALLSYNCX-ABCD",
         ] {
             assert_eq!(
                 decode_at(not_a_code, NOW).unwrap_err(),
@@ -436,9 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn a_code_from_a_newer_kith_is_refused_before_it_is_read() {
+    fn a_code_from_a_newer_wallsync_is_refused_before_it_is_read() {
         let code = encode(&ticket());
-        let future = format!("KITH2{}", &code[5..]);
+        let future = format!("WALLSYNC2{}", &code[5..]);
         assert_eq!(
             decode_at(&future, NOW).unwrap_err(),
             InviteError::WrongVersion

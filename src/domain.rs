@@ -24,9 +24,9 @@ impl PersonId {
     }
 }
 
-/// Read an id back from something kith itself wrote.
+/// Read an id back from something wallsync itself wrote.
 ///
-/// Validates nothing on purpose: rejecting an id a peer's newer kith minted
+/// Validates nothing on purpose: rejecting an id a peer's newer wallsync minted
 /// would drop that Person's attribution rather than show it.
 impl From<String> for PersonId {
     fn from(s: String) -> Self {
@@ -63,7 +63,7 @@ impl ItemId {
     }
 }
 
-/// Read an Item id back from local state kith wrote; validates nothing, as
+/// Read an Item id back from local state wallsync wrote; validates nothing, as
 /// [`PersonId`]'s does not.
 impl From<String> for ItemId {
     fn from(s: String) -> Self {
@@ -94,7 +94,7 @@ pub enum Role {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MembershipClaim {
     pub schema: u32,
-    /// The Sync Engine's identity for this Device. kith mints no second ID space.
+    /// The Sync Engine's identity for this Device. wallsync mints no second ID space.
     pub device: String,
     pub person: PersonId,
     pub display_name: String,
@@ -137,7 +137,7 @@ impl Presence {
     }
 }
 
-/// One piece of content: the bytes plus everything kith knows about them.
+/// One piece of content: the bytes plus everything wallsync knows about them.
 #[derive(Clone, Debug)]
 pub struct Item {
     pub id: ItemId,

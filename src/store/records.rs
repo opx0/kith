@@ -18,7 +18,7 @@ use crate::domain::{Item, ItemId, PersonId};
 /// The record schema this build writes and understands.
 ///
 /// It rides on every line rather than on the file, so a log whose tail a newer
-/// kith wrote is still readable up to that point.
+/// wallsync wrote is still readable up to that point.
 const SCHEMA: u32 = 1;
 
 /// How much of a log's tail is read to recover the next `seq`.
@@ -204,7 +204,7 @@ pub fn derive_items(records: &[Record], root: &Path) -> Vec<Item> {
             }
             Record::Bind { path, hash, size, .. } => {
                 // A binding whose `add` was lost or has not arrived invents no
-                // Item; `kith doctor` is where a sequence gap gets named.
+                // Item; `wallsync doctor` is where a sequence gap gets named.
                 if let Some(draft) = drafts.get_mut(id.as_str()) {
                     draft.bind(*when, path, hash, *size);
                 }
@@ -323,7 +323,7 @@ fn local_path(root: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 fn collection_dir(root: &Path, collection: &str) -> io::Result<PathBuf> {
-    Ok(root.join(".kith").join("items").join(segment(collection, "Collection id")?))
+    Ok(root.join(".wallsync").join("items").join(segment(collection, "Collection id")?))
 }
 
 fn log_path(root: &Path, collection: &str, device: &str) -> io::Result<PathBuf> {
@@ -348,7 +348,7 @@ fn segment<'a>(value: &'a str, what: &str) -> io::Result<&'a str> {
 /// Serialise one record as one line, stamped with the schema version and its
 /// position in this log.
 ///
-/// Nothing in the reduction reads `seq`; it exists so `kith doctor` can name a
+/// Nothing in the reduction reads `seq`; it exists so `wallsync doctor` can name a
 /// gap rather than reduce a truncated log as if it were whole.
 fn encode(rec: &Record, seq: u64) -> io::Result<String> {
     let mut value = serde_json::to_value(rec).map_err(invalid_data)?;
@@ -422,13 +422,13 @@ fn parse_line(line: &str) -> Option<Record> {
     let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
     let object = value.as_object_mut()?;
 
-    // A record from a newer kith is left alone rather than half-applied.
+    // A record from a newer wallsync is left alone rather than half-applied.
     let v = object.get("v").and_then(serde_json::Value::as_u64).unwrap_or(SCHEMA as u64);
     if v > SCHEMA as u64 {
         return None;
     }
 
-    // kith writes the kind as `t` and accepts `k` too, so a line typed by hand
+    // wallsync writes the kind as `t` and accepts `k` too, so a line typed by hand
     // from the spec — or by `$EDITOR` during a repair — still reduces.
     if !object.contains_key("t") {
         if let Some(kind) = object.remove("k") {
@@ -445,7 +445,7 @@ fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
-/// An advisory `flock` held for one append — two kith processes on one Device are
+/// An advisory `flock` held for one append — two wallsync processes on one Device are
 /// the only race there is.
 ///
 /// Holds the descriptor rather than the `File` so the caller can still read its
@@ -476,7 +476,7 @@ impl FileLock {
         Ok(Self { fd })
     }
 
-    /// Off Unix the append is still one complete line, but two local kith
+    /// Off Unix the append is still one complete line, but two local wallsync
     /// processes are not serialised.
     #[cfg(not(unix))]
     fn acquire(_file: &File) -> io::Result<Self> {
@@ -504,7 +504,7 @@ mod tests {
     fn scratch(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kith-records-{}-{}-{n}", std::process::id(), name));
+        let dir = std::env::temp_dir().join(format!("wallsync-records-{}-{}-{n}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -546,7 +546,7 @@ mod tests {
     }
 
     fn log_of(root: &Path, device: &str) -> PathBuf {
-        root.join(".kith/items/main").join(format!("{device}.jsonl"))
+        root.join(".wallsync/items/main").join(format!("{device}.jsonl"))
     }
 
     #[test]
@@ -643,7 +643,7 @@ mod tests {
     fn read_all_skips_a_damaged_line_and_keeps_going() {
         let root = scratch("damaged");
         let ana = PersonId::generate();
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         std::fs::create_dir_all(&dir).unwrap();
 
         let first = add(&ItemId::generate(), &ana, "2026-08-07T09:00:00Z", "a", "a.png", "b3:aa");
@@ -663,7 +663,7 @@ mod tests {
     fn read_all_discards_a_trailing_line_that_was_never_terminated() {
         let root = scratch("unterminated");
         let ana = PersonId::generate();
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         std::fs::create_dir_all(&dir).unwrap();
         let good = add(&ItemId::generate(), &ana, "2026-08-07T09:00:00Z", "a", "a.png", "b3:aa");
         let stump = encode(&good, 2).unwrap();
@@ -681,7 +681,7 @@ mod tests {
         append(&root, "main", ANA_DEVICE, &add(&item, &ana, "2026-08-07T09:00:00Z", "sunset", "sunset.png", "b3:aa")).unwrap();
 
         // The shape the engine leaves behind when one device id wrote twice.
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         let copy = dir.join(format!("{ANA_DEVICE}.sync-conflict-20260807-091402-{BEN_DEVICE}.jsonl"));
         std::fs::copy(log_of(&root, ANA_DEVICE), copy).unwrap();
 
@@ -691,9 +691,9 @@ mod tests {
     }
 
     #[test]
-    fn records_from_a_newer_kith_are_skipped_rather_than_half_applied() {
+    fn records_from_a_newer_wallsync_are_skipped_rather_than_half_applied() {
         let root = scratch("newer");
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         std::fs::create_dir_all(&dir).unwrap();
         let text = concat!(
             r#"{"v":2,"t":"add","seq":1,"at":"2026-08-07T09:00:00Z","by":"p-01k1yfq2m7vj3w8t0pz4rxab6c","item":"01K1YFQ2M9CQ2E7B5NK0YH3RVD","title":"sunset","path":"sunset.png","hash":"b3:aa","size":1,"mood":"warm"}"#,
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn a_line_written_with_the_adr_spelling_of_the_kind_still_reduces() {
         let root = scratch("kind-alias");
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         std::fs::create_dir_all(&dir).unwrap();
         let text = concat!(
             r#"{"v":1,"k":"add","seq":1,"at":"2026-08-07T09:00:00Z","by":"p-01k1yfq2m7vj3w8t0pz4rxab6c","item":"01K1YFQ2M9CQ2E7B5NK0YH3RVD","title":"sunset","path":"sunset.png","hash":"b3:aa","size":7}"#,
@@ -730,7 +730,7 @@ mod tests {
     fn an_unknown_kind_costs_its_own_line_and_nothing_else() {
         let root = scratch("unknown-kind");
         let ana = PersonId::generate();
-        let dir = root.join(".kith/items/main");
+        let dir = root.join(".wallsync/items/main");
         std::fs::create_dir_all(&dir).unwrap();
         let good = add(&ItemId::generate(), &ana, "2026-08-07T09:00:00Z", "a", "a.png", "b3:aa");
         let text = format!(

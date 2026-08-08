@@ -1,10 +1,10 @@
 //! The one production implementor of the Sync Engine seam, and the only module in
-//! kith allowed to say "Syncthing".
+//! wallsync allowed to say "Syncthing".
 //!
-//! kith never launches, embeds or supervises the daemon. Every configuration write
-//! is a read-modify-write of the daemon's own JSON, scoped to the folders kith
+//! wallsync never launches, embeds or supervises the daemon. Every configuration write
+//! is a read-modify-write of the daemon's own JSON, scoped to the folders wallsync
 //! created or adopted and the device entries for Devices a Person admitted, so
-//! fields kith has never heard of survive untouched.
+//! fields wallsync has never heard of survive untouched.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,18 +35,18 @@ const RESERVED: &[&str] = &[
     "*.sync-conflict-*",
 ];
 
-const CIRCLE_ID_PREFIX: &str = "kith-";
+const CIRCLE_ID_PREFIX: &str = "wallsync-";
 const CIRCLE_ID_ENTROPY: usize = 8;
 
 /// The per-Device scratch space, kept out of replication. `(?d)` so it cannot
 /// block a directory delete on a Device that still holds thumbnails.
-const LOCAL_SCRATCH_IGNORE: &str = "(?d).kith/local";
+const LOCAL_SCRATCH_IGNORE: &str = "(?d).wallsync/local";
 
 /// How long one long poll waits before the daemon answers with an empty batch.
 const EVENT_TIMEOUT_SECS: u64 = 60;
 
 /// The change feed's subscription. Filtered so the daemon's ring buffer fills with
-/// events kith cares about; an overflow costs a rescan.
+/// events wallsync cares about; an overflow costs a rescan.
 const EVENT_FILTER: &str = "ItemFinished,LocalIndexUpdated,RemoteIndexUpdated,StateChanged,\
 FolderSummary,FolderCompletion,DeviceConnected,DeviceDisconnected,PendingDevicesChanged,\
 PendingFoldersChanged,ConfigSaved,FolderErrors";
@@ -103,7 +103,7 @@ impl SyncthingEngine {
 
     fn config_candidates() -> Vec<PathBuf> {
         let mut out = Vec::new();
-        if let Ok(explicit) = std::env::var("KITH_ENGINE_CONFIG") {
+        if let Ok(explicit) = std::env::var("WALLSYNC_ENGINE_CONFIG") {
             out.push(PathBuf::from(explicit));
         }
         if let Some(base) = directories::BaseDirs::new() {
@@ -177,7 +177,7 @@ impl SyncthingEngine {
             .await
     }
 
-    /// Write a folder back after changing the keys kith owns; everything else in
+    /// Write a folder back after changing the keys wallsync owns; everything else in
     /// the object rides along untouched.
     async fn put_folder(&self, circle: &CircleId, folder: &Value) -> Result<(), SyncError> {
         self.put(&format!("/rest/config/folders/{}", escape(&circle.0)), folder)
@@ -187,7 +187,7 @@ impl SyncthingEngine {
 
     /// Give a peer Device an entry in the daemon's device list if it has none.
     ///
-    /// An existing entry is left exactly as it is: it may predate kith and its
+    /// An existing entry is left exactly as it is: it may predate wallsync and its
     /// settings are the Person's.
     async fn ensure_device(&self, device: &DeviceId, name: &str) -> Result<(), SyncError> {
         let path = format!("/rest/config/devices/{}", escape(&device.0));
@@ -227,8 +227,8 @@ impl SyncthingEngine {
     }
 
     /// Build a Circle's folder object from the daemon's own folder defaults, then
-    /// impose kith's recipe on top — the schema gains fields every release, and a
-    /// hand-built object would zero every one kith has not heard of.
+    /// impose wallsync's recipe on top — the schema gains fields every release, and a
+    /// hand-built object would zero every one wallsync has not heard of.
     async fn folder_from_recipe(
         &self,
         id: &CircleId,
@@ -297,6 +297,14 @@ impl SyncEngine for SyncthingEngine {
         Ok(map_folders(&v))
     }
 
+    async fn replicated_at(&self, root: &Path) -> Result<Option<CircleRef>, SyncError> {
+        let v = self.get("/rest/config/folders").await?;
+        let want = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        Ok(all_folders(&v).into_iter().find(|c| {
+            c.root.canonicalize().unwrap_or_else(|_| c.root.clone()) == want
+        }))
+    }
+
     /// Joiner, phase 1: register the Steward's Device and knock.
     ///
     /// Adding the entry *is* the knock: the two daemons connect and this Device
@@ -313,7 +321,7 @@ impl SyncEngine for SyncthingEngine {
     /// Joiner, phase 2: the Circle was offered back; place it at `root`.
     ///
     /// There is no "accept" endpoint — accepting is adding the folder to this
-    /// daemon's config with the offered id, which is why kith picks the root.
+    /// daemon's config with the offered id, which is why wallsync picks the root.
     async fn complete_join(&self, offer: &CircleOffer, root: &Path) -> Result<CircleRef, SyncError> {
         let me = self.local_device().await?;
         self.ensure_device(&offer.from, "").await?;
@@ -489,7 +497,7 @@ impl SyncEngine for SyncthingEngine {
         {
             Ok(v) => Ok(map_versions(&v, path)),
             // A folder with no versioner holds no archived versions — a true
-            // answer, and a `kith doctor` finding rather than a failure here.
+            // answer, and a `wallsync doctor` finding rather than a failure here.
             Err(SyncError::Engine(msg)) if msg.contains("no versioner") => Ok(Vec::new()),
             Err(e) => Err(e),
         }
@@ -728,8 +736,30 @@ fn jitter(base: Duration) -> Duration {
 
 /// `/rest/config/folders` → the Circles this engine replicates.
 ///
-/// Not every replicated space is a Circle: only a `kith-` id or a `.kith/`
-/// directory in the tree marks a folder as kith's. Anything else is left alone.
+/// Not every replicated space is a Circle: only a `wallsync-` id or a `.wallsync/`
+/// directory in the tree marks a folder as wallsync's. Anything else is left alone.
+/// Every folder the engine holds, with no opinion about whose it is.
+fn all_folders(v: &Value) -> Vec<CircleRef> {
+    v.as_array()
+        .map(|folders| {
+            folders
+                .iter()
+                .filter_map(|f| {
+                    Some(CircleRef {
+                        id: CircleId(f.get("id")?.as_str()?.to_string()),
+                        name: f
+                            .get("label")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        root: PathBuf::from(f.get("path")?.as_str()?),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn map_folders(v: &Value) -> Vec<CircleRef> {
     v.as_array()
         .map(|folders| {
@@ -738,7 +768,7 @@ fn map_folders(v: &Value) -> Vec<CircleRef> {
                 .filter_map(|f| {
                     let id = f.get("id")?.as_str()?.to_string();
                     let root = PathBuf::from(f.get("path")?.as_str()?);
-                    if !id.starts_with(CIRCLE_ID_PREFIX) && !root.join(".kith").is_dir() {
+                    if !id.starts_with(CIRCLE_ID_PREFIX) && !root.join(".wallsync").is_dir() {
                         return None;
                     }
                     Some(CircleRef {
@@ -1003,7 +1033,7 @@ fn shared_devices(folder: &Value) -> Vec<DeviceId> {
         .unwrap_or_default()
 }
 
-/// kith's folder recipe, imposed on a folder object without disturbing anything
+/// wallsync's folder recipe, imposed on a folder object without disturbing anything
 /// else in it.
 fn apply_recipe(folder: &mut Value, id: &CircleId, name: &str, root: &Path) {
     folder["id"] = json!(id.0);
@@ -1029,7 +1059,7 @@ fn shared_with(device: &DeviceId) -> Value {
     json!({ "deviceID": device.0, "introducedBy": "", "encryptionPassword": "" })
 }
 
-/// A device entry for a Device kith is admitting or knocking at. `autoAcceptFolders`
+/// A device entry for a Device wallsync is admitting or knocking at. `autoAcceptFolders`
 /// is written explicitly because the daemon's own default may well be `true`.
 fn new_device_entry(device: &DeviceId, name: &str) -> Value {
     json!({
@@ -1043,7 +1073,7 @@ fn new_device_entry(device: &DeviceId, name: &str) -> Value {
     })
 }
 
-/// `kith-` plus eight random base32 characters, never derived from the Circle's
+/// `wallsync-` plus eight random base32 characters, never derived from the Circle's
 /// name: the id is a handle and nothing may be read back out of it.
 fn mint_circle_id() -> String {
     let ulid = ulid::Ulid::generate().to_string();
@@ -1097,7 +1127,7 @@ fn extract_gui_address(xml: &str) -> Option<String> {
     extract_tag(&xml[gui..], "address")
 }
 
-/// The version floor, exposed for `kith doctor`.
+/// The version floor, exposed for `wallsync doctor`.
 pub fn version_floor() -> &'static str {
     VERSION_FLOOR
 }
@@ -1120,7 +1150,7 @@ mod tests {
     const STRANGER: &str = "LIZXMUU-KBDARMK-77NWE7L-6GO6LRW-CKU2VOE-Q6CVPAW-I4JOBXH-B5AAAQU";
 
     const FOLDERS: &str = r#"[
-      { "id": "kith-7QM4XKC2", "label": "Wallpapers", "path": "/home/ana/Pictures/Circle",
+      { "id": "wallsync-7QM4XKC2", "label": "Wallpapers", "path": "/home/ana/Pictures/Circle",
         "type": "sendreceive", "maxConflicts": 10,
         "devices": [
           { "deviceID": "M7KZXLB-HFVBLRE-JB7FCKY-RYD72WT-QEQ4347-Y44X3BX-OQZVGRM-LDNS2QO",
@@ -1157,7 +1187,7 @@ mod tests {
     }"#;
 
     const PENDING_FOLDERS: &str = r#"{
-      "kith-OFFERED1": {
+      "wallsync-OFFERED1": {
         "offeredBy": {
           "LIZXMUU-KBDARMK-77NWE7L-6GO6LRW-CKU2VOE-Q6CVPAW-I4JOBXH-B5AAAQU": {
             "time": "2026-08-07T16:19:38Z", "label": "Wallpapers",
@@ -1183,14 +1213,14 @@ mod tests {
 
     const EVENT_BATCH: &str = r#"[
       { "id": 66, "globalID": 67, "type": "ItemFinished",
-        "data": { "action": "update", "error": null, "folder": "kith-7QM4XKC2",
+        "data": { "action": "update", "error": null, "folder": "wallsync-7QM4XKC2",
                   "item": "sunset.png", "type": "file" } },
       { "id": 67, "globalID": 68, "type": "LocalIndexUpdated",
-        "data": { "filenames": ["sunset.png", "dawn.png"], "folder": "kith-7QM4XKC2",
+        "data": { "filenames": ["sunset.png", "dawn.png"], "folder": "wallsync-7QM4XKC2",
                   "items": 2, "sequence": 2, "version": 2 } },
       { "id": 68, "globalID": 69, "type": "RemoteIndexUpdated",
         "data": { "device": "MKNSEL2-Z7BKMYM-EYGID6P-5HU44J5-AN5TPZ6-WNKU3JA-24PUCIK-632SIQ2",
-                  "folder": "kith-7QM4XKC2", "items": 1, "sequence": 1, "version": 1 } },
+                  "folder": "wallsync-7QM4XKC2", "items": 1, "sequence": 1, "version": 1 } },
       { "id": 69, "globalID": 70, "type": "DeviceConnected",
         "data": { "addr": "192.168.1.40:22000", "clientName": "syncthing",
                   "clientVersion": "v2.1.2", "deviceName": "Bo's phone",
@@ -1204,7 +1234,7 @@ mod tests {
                                "deviceID": "LIZXMUU-KBDARMK-77NWE7L-6GO6LRW-CKU2VOE-Q6CVPAW-I4JOBXH-B5AAAQU",
                                "name": "Bo's laptop" } ] } },
       { "id": 72, "globalID": 73, "type": "StateChanged",
-        "data": { "duration": 0.9, "folder": "kith-7QM4XKC2", "from": "scanning", "to": "idle" } }
+        "data": { "duration": 0.9, "folder": "wallsync-7QM4XKC2", "from": "scanning", "to": "idle" } }
     ]"#;
 
     fn json_of(text: &str) -> Value {
@@ -1230,15 +1260,15 @@ mod tests {
 
     #[test]
     fn a_folder_list_becomes_circles() {
-        // An adopted folder keeps its original id, so only a real `.kith/`
-        // directory in its tree marks it as kith's.
-        let adopted = std::env::temp_dir().join(format!("kith-adopted-{}", std::process::id()));
-        std::fs::create_dir_all(adopted.join(".kith")).unwrap();
+        // An adopted folder keeps its original id, so only a real `.wallsync/`
+        // directory in its tree marks it as wallsync's.
+        let adopted = std::env::temp_dir().join(format!("wallsync-adopted-{}", std::process::id()));
+        std::fs::create_dir_all(adopted.join(".wallsync")).unwrap();
         let folders = FOLDERS.replace("/home/ana/Wallpapers", &adopted.display().to_string());
 
         let circles = map_folders(&json_of(&folders));
         assert_eq!(circles.len(), 2);
-        assert_eq!(circles[0].id, CircleId("kith-7QM4XKC2".into()));
+        assert_eq!(circles[0].id, CircleId("wallsync-7QM4XKC2".into()));
         assert_eq!(circles[0].name, "Wallpapers");
         assert_eq!(circles[0].root, PathBuf::from("/home/ana/Pictures/Circle"));
         // An unnamed Circle is a real state, not a reason to skip it.
@@ -1249,10 +1279,10 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_kith_never_touched_is_not_a_circle() {
+    fn a_folder_wallsync_never_touched_is_not_a_circle() {
         let circles = map_folders(&json_of(FOLDERS));
-        assert_eq!(circles.len(), 1, "only the kith- folder; the adopted one has no .kith here");
-        assert_eq!(circles[0].id, CircleId("kith-7QM4XKC2".into()));
+        assert_eq!(circles.len(), 1, "only the wallsync- folder; the adopted one has no .wallsync here");
+        assert_eq!(circles[0].id, CircleId("wallsync-7QM4XKC2".into()));
     }
 
     #[test]
@@ -1280,14 +1310,14 @@ mod tests {
     fn an_offered_circle_carries_the_label_the_offering_device_gave_it() {
         let label = offered_label(
             &json_of(PENDING_FOLDERS),
-            &CircleId("kith-OFFERED1".into()),
+            &CircleId("wallsync-OFFERED1".into()),
             &DeviceId(STRANGER.into()),
         );
         assert_eq!(label.as_deref(), Some("Wallpapers"));
         assert_eq!(
             offered_label(
                 &json_of(PENDING_FOLDERS),
-                &CircleId("kith-OFFERED1".into()),
+                &CircleId("wallsync-OFFERED1".into()),
                 &DeviceId(PEER.into())
             ),
             None
@@ -1355,7 +1385,7 @@ mod tests {
             .flat_map(|event| map_event(event, &circles_of))
             .collect();
 
-        let circle = CircleId("kith-7QM4XKC2".into());
+        let circle = CircleId("wallsync-7QM4XKC2".into());
         let peer = DeviceId(PEER.into());
 
         assert!(matches!(
@@ -1391,7 +1421,7 @@ mod tests {
 
     #[test]
     fn presence_is_reported_once_per_circle_the_device_shares() {
-        let two = json_of(&FOLDERS.replace("\"wallpapers\"", "\"kith-SECOND01\"").replace(
+        let two = json_of(&FOLDERS.replace("\"wallpapers\"", "\"wallsync-SECOND01\"").replace(
             r#"{ "deviceID": "M7KZXLB-HFVBLRE-JB7FCKY-RYD72WT-QEQ4347-Y44X3BX-OQZVGRM-LDNS2QO",
             "introducedBy": "", "encryptionPassword": "" }
         ] }
@@ -1428,7 +1458,7 @@ mod tests {
         assert!(!cursors.advance(68));
         assert!(
             cursors.advance(412),
-            "the daemon's buffer overflowed while kith was away — the events in \
+            "the daemon's buffer overflowed while wallsync was away — the events in \
              between are gone, and a caller must re-scan rather than trust deltas"
         );
         assert!(!cursors.advance(413), "and continuity resumes from there");
@@ -1478,15 +1508,15 @@ mod tests {
 
     #[test]
     fn the_folder_recipe_is_the_one_the_adr_fixed() {
-        let mut folder = json_of(r#"{ "rescanIntervalS": 3600, "somethingKithNeverHeardOf": 7 }"#);
+        let mut folder = json_of(r#"{ "rescanIntervalS": 3600, "somethingWallsyncNeverHeardOf": 7 }"#);
         apply_recipe(
             &mut folder,
-            &CircleId("kith-7QM4XKC2".into()),
+            &CircleId("wallsync-7QM4XKC2".into()),
             "Wallpapers",
             Path::new("/home/ana/Pictures/Circle"),
         );
 
-        assert_eq!(folder["id"], json!("kith-7QM4XKC2"));
+        assert_eq!(folder["id"], json!("wallsync-7QM4XKC2"));
         assert_eq!(folder["label"], json!("Wallpapers"));
         assert_eq!(folder["path"], json!("/home/ana/Pictures/Circle"));
         assert_eq!(folder["type"], json!("sendreceive"));
@@ -1495,13 +1525,13 @@ mod tests {
         assert_eq!(folder["versioning"]["type"], json!("simple"));
         assert_eq!(folder["versioning"]["params"]["keep"], json!("5"));
         assert_eq!(folder["versioning"]["params"]["cleanoutDays"], json!("30"));
-        // Read-modify-write: what kith does not own survives untouched.
-        assert_eq!(folder["somethingKithNeverHeardOf"], json!(7));
+        // Read-modify-write: what wallsync does not own survives untouched.
+        assert_eq!(folder["somethingWallsyncNeverHeardOf"], json!(7));
         assert_eq!(folder["rescanIntervalS"], json!(3600));
     }
 
     #[test]
-    fn a_device_entry_kith_writes_never_accepts_circles_on_its_own() {
+    fn a_device_entry_wallsync_writes_never_accepts_circles_on_its_own() {
         let entry = new_device_entry(&DeviceId(PEER.into()), "Bo's phone");
         assert_eq!(entry["autoAcceptFolders"], json!(false));
         assert_eq!(entry["introducer"], json!(false));
@@ -1520,7 +1550,7 @@ mod tests {
 
     #[test]
     fn ids_are_escaped_before_they_reach_a_url() {
-        assert_eq!(escape("kith-7QM4XKC2"), "kith-7QM4XKC2");
+        assert_eq!(escape("wallsync-7QM4XKC2"), "wallsync-7QM4XKC2");
         assert_eq!(escape("holiday photos/2026"), "holiday%20photos%2F2026");
         assert_eq!(pointer("a/b~c"), "a~1b~0c");
     }

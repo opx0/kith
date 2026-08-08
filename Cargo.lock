@@ -1591,29 +1591,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kith"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "clap",
- "crossterm",
- "directories",
- "futures-core",
- "image",
- "jiff",
- "ratatui",
- "ratatui-image",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-stream",
- "toml",
- "ulid",
-]
-
-[[package]]
 name = "lab"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3763,6 +3740,29 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "wallsync"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "crossterm",
+ "directories",
+ "futures-core",
+ "image",
+ "jiff",
+ "ratatui",
+ "ratatui-image",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "ulid",
 ]
 
 [[package]]

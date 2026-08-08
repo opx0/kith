@@ -10,7 +10,7 @@ use crate::domain::Item;
 
 pub mod wallpaper;
 
-/// Everything kith knows about one kind of content. Object-safe.
+/// Everything wallsync knows about one kind of content. Object-safe.
 pub trait Provider: Send + Sync {
     /// Stable identifier ("wallpaper"). Recorded in Collection metadata.
     fn id(&self) -> &'static str;

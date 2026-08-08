@@ -1,4 +1,4 @@
-//! `kith list` and `kith status` — the two commands that only look.
+//! `wallsync list` and `wallsync status` — the two commands that only look.
 //!
 //! Local facts plus what the engine says, and nothing else. Presence is never
 //! "online": `unknown` is a real answer, `not connected` would be a claim this
@@ -46,21 +46,21 @@ const WALLPAPER: &str = "wallpaper";
 // ── the honesty strings, verbatim (spec §7.2) ────────────────────────
 
 /// Printed under any table with a Role in it; a Role shown without it is a bug.
-const ROLE_CAVEAT_LONG: &str = "Roles are agreements, not enforcement. kith has no server: any Member's Device \
-can add, change or delete Items in this Circle. What kith does guarantee is admission — only Devices you approve \
+const ROLE_CAVEAT_LONG: &str = "Roles are agreements, not enforcement. wallsync has no server: any Member's Device \
+can add, change or delete Items in this Circle. What wallsync does guarantee is admission — only Devices you approve \
 get in — and recovery: every other Device keeps the last 5 versions of every Item for 30 days.";
 
 /// The one-line contexts: `status`, and anywhere a Role is a single cell.
 const ROLE_CAVEAT_SHORT: &str = "Roles are agreements, not enforcement — admission is the only gate.";
 
-/// Printed wherever attribution is shown — `kith list items` has an ADDED BY column.
+/// Printed wherever attribution is shown — `wallsync list items` has an ADDED BY column.
 const ATTRIBUTION_CAVEAT: &str = "Who added an Item is asserted by the Device that wrote the record, never proven \
-— kith signs nothing. Attribution is believable because a human admitted that Device to the Circle, not because \
-kith can verify what it says.";
+— wallsync signs nothing. Attribution is believable because a human admitted that Device to the Circle, not because \
+wallsync can verify what it says.";
 
 /// The same honesty for the surface that lists People: a claim is not a proof.
 const CLAIM_CAVEAT: &str = "A Membership claim is one Device saying which Person it speaks for. Nothing signs \
-it — a claim is believable because a human admitted that Device to this Circle, not because kith can verify \
+it — a claim is believable because a human admitted that Device to this Circle, not because wallsync can verify \
 what it says.";
 
 /// Presence with no engine behind it — never "not connected".
@@ -69,7 +69,7 @@ Presence reads unknown rather than not connected.";
 
 // ── the verbs ────────────────────────────────────────────────────────
 
-/// `kith list [items|circles|members]` — the Collection, the Circles, the People.
+/// `wallsync list [items|circles|members]` — the Collection, the Circles, the People.
 ///
 /// Never needs the Sync Engine: with it down the tree is still real, so every
 /// subject exits 0. Only `status` treats unreachability as its own result.
@@ -106,7 +106,7 @@ pub async fn list(subject: Option<&str>, circle: Option<&str>, json: bool) -> i3
     }
 }
 
-/// `kith status` — every Circle's sync state and per-peer completion.
+/// `wallsync status` — every Circle's sync state and per-peer completion.
 ///
 /// Exits 69 when the Sync Engine is unreachable and prints the local facts
 /// anyway, so it works as a health probe without becoming useless as a report.
@@ -235,9 +235,9 @@ impl Subject {
             other => Err(Failure {
                 code: "usage.unknown_subject",
                 exit: EX_USAGE,
-                message: format!("kith list has nothing called {other:?}"),
+                message: format!("wallsync list has nothing called {other:?}"),
                 detail: None,
-                fix: Some("Say one of: kith list items, kith list circles, kith list members.".into()),
+                fix: Some("Say one of: wallsync list items, wallsync list circles, wallsync list members.".into()),
             }),
         }
     }
@@ -314,7 +314,7 @@ async fn list_circles(
         report.note(
             INFO,
             "circle.none",
-            "You are in no Circles yet. Run kith create <name>, or kith join <code> if someone invited you.",
+            "You are in no Circles yet. Run wallsync create <name>, or wallsync join <code> if someone invited you.",
         );
     }
     report.note(CAVEAT, "role.advisory", ROLE_CAVEAT_SHORT);
@@ -390,7 +390,7 @@ fn active<'a>(circles: &'a [CircleRef], wanted: Option<&str>) -> Result<&'a Circ
             exit: EX_USAGE,
             message: "You are in no Circles yet.".into(),
             detail: None,
-            fix: Some("Run kith create <name>, or kith join <code> if someone invited you.".into()),
+            fix: Some("Run wallsync create <name>, or wallsync join <code> if someone invited you.".into()),
         }),
         [only] => Ok(only),
         many => Err(Failure {
@@ -406,7 +406,7 @@ fn active<'a>(circles: &'a [CircleRef], wanted: Option<&str>) -> Result<&'a Circ
 // ── local facts: one Circle's tree, read straight off disk ───────────
 
 /// Everything one Circle says about itself on this Device. Asks the Sync Engine
-/// nothing, which is what makes `kith list` work with the daemon down.
+/// nothing, which is what makes `wallsync list` work with the daemon down.
 struct Local {
     descriptor: Option<CircleDescriptor>,
     collection: String,
@@ -503,7 +503,7 @@ impl Local {
     }
 
     /// The Person that Device speaks for, if any claim names them. A Device that
-    /// never ran kith has published none, and kith says so rather than invent one.
+    /// never ran wallsync has published none, and wallsync says so rather than invent one.
     fn steward_person(&self) -> Option<String> {
         let device = self.steward_device()?;
         let claim = self.claims.iter().find(|c| c.device == device)?;
@@ -520,7 +520,7 @@ impl Local {
 /// Deliberately *not* [`claims::derive_people`], which drops a Person whose every
 /// claim carries `left_at` — attribution has to outlive Membership. Newest
 /// `asserted` wins, ties go to the smaller Device id, and an undatable claim never
-/// wins a freshness tie-break against one kith can date.
+/// wins a freshness tie-break against one wallsync can date.
 fn display_names(claims: &[MembershipClaim]) -> BTreeMap<String, String> {
     let mut best: BTreeMap<String, (&MembershipClaim, Option<i128>)> = BTreeMap::new();
     for claim in claims {
@@ -557,7 +557,7 @@ fn unnamed(person_id: &str) -> String {
 
 // ── rows ─────────────────────────────────────────────────────────────
 
-/// One Item as `kith list items` renders it. No unseen dot: the CLI holds no
+/// One Item as `wallsync list items` renders it. No unseen dot: the CLI holds no
 /// record of what this Person has looked at.
 fn item_rows(local: &Local, favourites: &BTreeSet<String>, facts: bool) -> Vec<ItemRow> {
     let provider = facts.then(WallpaperProvider::default);
@@ -664,7 +664,7 @@ fn member_rows(
 /// One Device's live view of one Person's Devices, and nothing more.
 ///
 /// `Connected` if any of their Devices is connected to *this* one; `Unknown` when
-/// the engine said nothing, and for this Person — kith holds no connection to
+/// the engine said nothing, and for this Person — wallsync holds no connection to
 /// itself. The second value says whether the engine knows any of their Devices to
 /// be in this Circle at all.
 fn presence_of(devices: &[String], peers: Option<&[PeerDevice]>, you: bool) -> (Presence, Option<bool>) {
@@ -705,7 +705,7 @@ struct Sync {
     trouble: Option<SyncError>,
     local_device: Option<String>,
     /// The globs the engine declares as its own, kept even when the daemon stops
-    /// answering. `None` means kith never got as far as asking, and then it counts
+    /// answering. `None` means wallsync never got as far as asking, and then it counts
     /// nothing rather than guess at names it must not know.
     reserved: Option<Vec<&'static str>>,
 }
@@ -716,7 +716,7 @@ impl Sync {
     }
 
     /// The Circles this Device replicates. The engine's answer is the truth and
-    /// is remembered; with it down the remembered copy keeps `kith list` working.
+    /// is remembered; with it down the remembered copy keeps `wallsync list` working.
     async fn circles(&self) -> Vec<CircleRef> {
         if let Some(engine) = &self.engine
             && let Ok(circles) = engine.circles().await
@@ -766,7 +766,7 @@ async fn connect(loaded: &config::Loaded) -> Sync {
     let address = Some(creds.base_url.clone());
     let source = Some(creds.source.clone());
     let engine = SyncthingEngine::new(creds);
-    // Asked once, up front, so a daemon that stops answering does not stop kith
+    // Asked once, up front, so a daemon that stops answering does not stop wallsync
     // from knowing which paths are the engine's own.
     let reserved = Some(engine.reserved_paths().to_vec());
 
@@ -817,46 +817,46 @@ fn credentials(loaded: &config::Loaded) -> Option<Credentials> {
 }
 
 /// The engine's own trouble, as a failure a Person can act on. Every fix line
-/// points at `kith doctor`: the daemon's own name lives in exactly one module.
+/// points at `wallsync doctor`: the daemon's own name lives in exactly one module.
 fn engine_failure(trouble: &SyncError, address: Option<&str>, credentials: Option<&Path>) -> Failure {
     let at = address.unwrap_or("the Sync Engine's address");
     match trouble {
-        // No address means kith found no credentials to try, which is a different
+        // No address means wallsync found no credentials to try, which is a different
         // sentence from a daemon that is not answering.
         SyncError::Unreachable if address.is_none() => Failure {
             code: "engine.unreachable",
             exit: EX_UNAVAILABLE,
-            message: "kith found no Sync Engine credentials on this Device.".into(),
+            message: "wallsync found no Sync Engine credentials on this Device.".into(),
             detail: None,
-            fix: Some("Run kith doctor — it names where kith looks and what has to be running.".into()),
+            fix: Some("Run wallsync doctor — it names where wallsync looks and what has to be running.".into()),
         },
         SyncError::Unreachable => Failure {
             code: "engine.unreachable",
             exit: EX_UNAVAILABLE,
             message: format!("The Sync Engine is not answering at {at}."),
             detail: Some("Nothing is lost; changes sync when it returns.".into()),
-            fix: Some("Start the Sync Engine daemon, then run: kith doctor".into()),
+            fix: Some("Start the Sync Engine daemon, then run: wallsync doctor".into()),
         },
         SyncError::Unauthorized => Failure {
             code: "engine.unauthorized",
             exit: EX_CONFIG,
-            message: format!("The Sync Engine at {at} rejected the credentials kith found."),
+            message: format!("The Sync Engine at {at} rejected the credentials wallsync found."),
             detail: credentials.map(|p| format!("read from {}", p.display())),
-            fix: Some("Check that API key, or set [sync_engine] api_key in kith's config. kith never rewrites a key it did not issue.".into()),
+            fix: Some("Check that API key, or set [sync_engine] api_key in wallsync's config. wallsync never rewrites a key it did not issue.".into()),
         },
         SyncError::Incompatible(v) => Failure {
             code: "engine.incompatible",
             exit: EX_UNAVAILABLE,
-            message: format!("The Sync Engine at {at} is below the version kith supports: {v}."),
+            message: format!("The Sync Engine at {at} is below the version wallsync supports: {v}."),
             detail: None,
-            fix: Some("Upgrade the Sync Engine daemon, then run: kith doctor".into()),
+            fix: Some("Upgrade the Sync Engine daemon, then run: wallsync doctor".into()),
         },
         SyncError::NotFound => Failure {
             code: "engine.not_found",
             exit: EX_DATA,
             message: "The Sync Engine does not know this Circle.".into(),
             detail: None,
-            fix: Some("Run kith doctor to see which Circles it does know.".into()),
+            fix: Some("Run wallsync doctor to see which Circles it does know.".into()),
         },
         SyncError::Engine(text) => Failure {
             code: "engine.failed",
@@ -876,7 +876,7 @@ fn offline_line(trouble: &SyncError, address: Option<&str>) -> String {
         }
         (_, Some(at)) => format!("Sync Engine offline ({at}). Working from local content."),
         (_, None) => {
-            "No Sync Engine credentials found — kith doctor says where it looks. Working from local content."
+            "No Sync Engine credentials found — wallsync doctor says where it looks. Working from local content."
                 .to_string()
         }
     }
@@ -903,7 +903,7 @@ struct KnownCircle {
 }
 
 fn known_circles_path() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|b| b.cache_dir().join("kith/circles.toml"))
+    directories::BaseDirs::new().map(|b| b.cache_dir().join("wallsync/circles.toml"))
 }
 
 fn remember_circles(circles: &[CircleRef]) {
@@ -953,12 +953,12 @@ fn recall_circles() -> Vec<CircleRef> {
 
 // ── Favourites: read, never written, never sent anywhere ─────────────
 
-/// This Person's private marks, so `kith list items` can show the `★` column.
+/// This Person's private marks, so `wallsync list items` can show the `★` column.
 ///
 /// Read-only by construction: the toggle belongs to the Action, not to a report,
 /// and Favourites live outside every synced tree.
 fn favourites_of(circle: &str) -> BTreeSet<String> {
-    let Some(path) = directories::BaseDirs::new().map(|b| b.data_dir().join("kith/favourites.jsonl")) else {
+    let Some(path) = directories::BaseDirs::new().map(|b| b.data_dir().join("wallsync/favourites.jsonl")) else {
         return BTreeSet::new();
     };
     match std::fs::read_to_string(&path) {
@@ -1027,9 +1027,9 @@ fn count_engine_copies(root: &Path, reserved: &[&str]) -> usize {
             let Some(name) = name.to_str() else { continue };
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                // Neither kith's own tree nor the engine's is a copy sitting
+                // Neither wallsync's own tree nor the engine's is a copy sitting
                 // next to an Item.
-                if name == ".kith" || skip_dirs.contains(&name) {
+                if name == ".wallsync" || skip_dirs.contains(&name) {
                     continue;
                 }
                 walk(&entry.path(), skip_dirs, patterns, depth - 1, found);
@@ -1135,7 +1135,7 @@ impl Report {
     }
 
     /// Print the report and hand back the process's exit code. `data` is present
-    /// even when a failure is attached — `kith status` with the engine down is a
+    /// even when a failure is attached — `wallsync status` with the engine down is a
     /// real answer plus a real failure.
     fn finish<T: Serialize>(
         self,
@@ -1353,7 +1353,7 @@ fn render_items(data: &ItemsData, tty: bool) -> String {
     if data.items.is_empty() {
         return if tty {
             format!(
-                "Nothing in {} yet. kith add <paths…>, or wait — Items appear as they arrive.\n",
+                "Nothing in {} yet. wallsync add <paths…>, or wait — Items appear as they arrive.\n",
                 data.circle.name
             )
         } else {
@@ -1376,7 +1376,7 @@ fn render_items(data: &ItemsData, tty: bool) -> String {
                 item.bytes.map(bytes_human).unwrap_or_else(|| "—".into()),
                 match (item.width, item.height) {
                     (Some(w), Some(h)) => format!("{w}×{h}"),
-                    // A fact kith cannot verify prints as an em dash, never as a
+                    // A fact wallsync cannot verify prints as an em dash, never as a
                     // plausible number.
                     _ => "—".into(),
                 },
@@ -1477,7 +1477,7 @@ fn render_status(data: &StatusData, _tty: bool) -> String {
             data.engine.version.as_deref().unwrap_or("version unknown")
         ),
         (false, Some(address)) => format!("not answering · {address} · these are local facts, last known"),
-        _ => "no credentials found — kith doctor says where it looks".to_string(),
+        _ => "no credentials found — wallsync doctor says where it looks".to_string(),
     };
     out.push_str(&format!("Sync Engine   {engine}\n"));
 
@@ -1486,12 +1486,12 @@ fn render_status(data: &StatusData, _tty: bool) -> String {
             Some(device) => format!("{} ({device})", p.name),
             None => p.name.clone(),
         },
-        None => "no Identity yet — run kith init".to_string(),
+        None => "no Identity yet — run wallsync init".to_string(),
     };
     out.push_str(&format!("You           {you}\n"));
 
     if data.circles.is_empty() {
-        out.push_str("\nYou are in no Circles yet. Run kith create <name>, or kith join <code>.\n");
+        out.push_str("\nYou are in no Circles yet. Run wallsync create <name>, or wallsync join <code>.\n");
         return out;
     }
 
@@ -1544,7 +1544,7 @@ fn render_status(data: &StatusData, _tty: bool) -> String {
             (Some(_), _, true) => "you — every join is approved on this Device".to_string(),
             (Some(device), Some(person), false) => format!("{person} ({device})"),
             (Some(device), None, false) => {
-                format!("{device} — no Membership claim yet, so kith cannot name the Person")
+                format!("{device} — no Membership claim yet, so wallsync cannot name the Person")
             }
             (None, _, _) => "unknown — this Circle has no descriptor yet".to_string(),
         };
@@ -1672,7 +1672,7 @@ fn wrap(text: &str, width: usize) -> String {
     out
 }
 
-/// SI units, because the labels say SI — `kith add` and `kith list` must never
+/// SI units, because the labels say SI — `wallsync add` and `wallsync list` must never
 /// print two different sizes for one Item.
 fn bytes_human(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
@@ -1696,14 +1696,14 @@ fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
     if n == 1 { one } else { many }
 }
 
-/// The same eight characters, grouped 4-4, that `kith approve` and the TUI
+/// The same eight characters, grouped 4-4, that `wallsync approve` and the TUI
 /// print. A Person compares this string against another Device's out of band,
 /// so every surface has to render it identically.
 fn short_device(device: &str) -> String {
     crate::cmd::membership::fingerprint(device)
 }
 
-/// `~/kith/walls` rather than `/home/ana/kith/walls`.
+/// `~/wallsync/walls` rather than `/home/ana/wallsync/walls`.
 fn tilde(path: &Path) -> String {
     let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
     match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
@@ -1717,7 +1717,7 @@ fn instant(at: &str) -> Option<i128> {
     at.parse::<jiff::Timestamp>().ok().map(|t| t.as_nanosecond())
 }
 
-/// RFC 3339 UTC on the way out; a timestamp kith cannot parse is passed through.
+/// RFC 3339 UTC on the way out; a timestamp wallsync cannot parse is passed through.
 fn normalise_time(at: &str) -> String {
     match at.parse::<jiff::Timestamp>() {
         Ok(t) => t.to_string(),
@@ -1806,7 +1806,7 @@ fn identity(report: &mut Report) -> Option<Identity> {
             report.note(
                 INFO,
                 "identity.missing",
-                "No Identity on this Device yet — run kith init. Listing still works.",
+                "No Identity on this Device yet — run wallsync init. Listing still works.",
             );
             None
         }
@@ -1859,7 +1859,7 @@ mod tests {
     fn descriptor(founder_person: &PersonId, founder_device: &str) -> CircleDescriptor {
         CircleDescriptor {
             schema: 1,
-            id: "kith-4tj2q9xa".into(),
+            id: "wallsync-4tj2q9xa".into(),
             name: "walls".into(),
             created: "2026-08-07T09:02:11Z".into(),
             founder_person: founder_person.as_str().to_string(),
@@ -1873,7 +1873,7 @@ mod tests {
             title: title.to_string(),
             added_by: by.clone(),
             added_at: at.to_string(),
-            path: present.then(|| PathBuf::from("/tmp/kith-report-tests/sunset.png")),
+            path: present.then(|| PathBuf::from("/tmp/wallsync-report-tests/sunset.png")),
             hash: Some("b3:aa".into()),
             bytes: Some(1_993_421),
         }
@@ -1899,7 +1899,7 @@ mod tests {
 
         let refused = Subject::parse(Some("everything")).unwrap_err();
         assert_eq!(refused.exit, EX_USAGE);
-        assert!(refused.fix.unwrap().contains("kith list members"));
+        assert!(refused.fix.unwrap().contains("wallsync list members"));
     }
 
     #[test]
@@ -1916,16 +1916,16 @@ mod tests {
         let circle = |id: &str, name: &str| CircleRef {
             id: CircleId(id.into()),
             name: name.into(),
-            root: PathBuf::from("/tmp/kith"),
+            root: PathBuf::from("/tmp/wallsync"),
         };
 
-        let one = vec![circle("kith-a", "walls")];
+        let one = vec![circle("wallsync-a", "walls")];
         assert_eq!(active(&one, None).unwrap().name, "walls");
 
         let none: Vec<CircleRef> = Vec::new();
         assert_eq!(active(&none, None).unwrap_err().exit, EX_USAGE);
 
-        let many = vec![circle("kith-a", "walls"), circle("kith-b", "photos")];
+        let many = vec![circle("wallsync-a", "walls"), circle("wallsync-b", "photos")];
         let refused = active(&many, None).unwrap_err();
         assert_eq!(refused.exit, EX_USAGE);
         assert!(refused.message.contains("--circle"), "{}", refused.message);
@@ -2000,7 +2000,7 @@ mod tests {
 
         let unnamed = local(Some(descriptor(&ana, ANA_DEVICE)), Vec::new(), Vec::new());
         assert_eq!(unnamed.steward_device(), Some(ANA_DEVICE));
-        assert_eq!(unnamed.steward_person(), None, "a Device that never ran kith names no Person");
+        assert_eq!(unnamed.steward_person(), None, "a Device that never ran wallsync names no Person");
 
         let named = local(
             Some(descriptor(&ana, ANA_DEVICE)),
@@ -2035,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn kith_never_claims_a_connection_to_itself() {
+    fn wallsync_never_claims_a_connection_to_itself() {
         let devices = vec![ANA_DEVICE.to_string()];
         assert_eq!(
             presence_of(&devices, Some(&[peer(ANA_DEVICE, "ana-desk", true)]), true),
@@ -2122,7 +2122,7 @@ mod tests {
 
         let rendered = render_members(
             &MembersData {
-                circle: CircleInfo { id: "kith-a".into(), name: "walls".into(), root: "/tmp".into() },
+                circle: CircleInfo { id: "wallsync-a".into(), name: "walls".into(), root: "/tmp".into() },
                 members,
                 unclaimed_devices: unclaimed,
             },
@@ -2185,7 +2185,7 @@ mod tests {
 
         let rendered = render_items(
             &ItemsData {
-                circle: CircleInfo { id: "kith-a".into(), name: "walls".into(), root: "/tmp".into() },
+                circle: CircleInfo { id: "wallsync-a".into(), name: "walls".into(), root: "/tmp".into() },
                 collection: COLLECTION.into(),
                 items: rows,
             },
@@ -2236,7 +2236,7 @@ mod tests {
         assert!(ATTRIBUTION_CAVEAT.contains("never proven"));
         assert!(PRESENCE_STALE.contains("unknown rather than not connected"));
 
-        assert!(CLAIM_CAVEAT.contains("not because kith can verify"));
+        assert!(CLAIM_CAVEAT.contains("not because wallsync can verify"));
 
         for text in [ROLE_CAVEAT_LONG, ROLE_CAVEAT_SHORT, ATTRIBUTION_CAVEAT, CLAIM_CAVEAT, PRESENCE_STALE] {
             let lower = text.to_lowercase();
@@ -2258,7 +2258,7 @@ mod tests {
         assert_eq!(f.exit, EX_UNAVAILABLE);
         assert_eq!(f.code, "engine.unreachable");
         assert!(f.message.contains("http://127.0.0.1:8384"));
-        assert!(f.fix.unwrap().contains("kith doctor"));
+        assert!(f.fix.unwrap().contains("wallsync doctor"));
 
         let rejected = engine_failure(
             &SyncError::Unauthorized,
@@ -2269,7 +2269,7 @@ mod tests {
         assert!(rejected.detail.unwrap().contains("config.xml"), "say where the key came from");
         assert!(
             !rejected.fix.unwrap().to_lowercase().contains("regenerat"),
-            "kith never rotates a key it did not issue"
+            "wallsync never rotates a key it did not issue"
         );
     }
 
@@ -2277,13 +2277,13 @@ mod tests {
 
     #[test]
     fn piped_output_drops_the_header_and_separates_cells_with_one_tab() {
-        let rows = vec![vec!["walls".to_string(), "kith-a".to_string()]];
+        let rows = vec![vec!["walls".to_string(), "wallsync-a".to_string()]];
         let piped = table(&["NAME", "ID"], &rows, &[10, 10], false);
-        assert_eq!(piped, "walls\tkith-a\n");
+        assert_eq!(piped, "walls\twallsync-a\n");
 
         let terminal = table(&["NAME", "ID"], &rows, &[10, 10], true);
         assert!(terminal.starts_with("NAME"), "{terminal}");
-        assert!(terminal.contains("walls  kith-a"), "{terminal}");
+        assert!(terminal.contains("walls  wallsync-a"), "{terminal}");
     }
 
     #[test]
@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn a_count_kith_cannot_verify_prints_as_a_dash() {
+    fn a_count_wallsync_cannot_verify_prints_as_a_dash() {
         let ana = PersonId::generate();
         let id = ItemId::generate();
         let mut without = item(&id, &ana, "2026-08-07T09:00:00Z", "sunset", false);
@@ -2304,7 +2304,7 @@ mod tests {
 
         let rendered = render_items(
             &ItemsData {
-                circle: CircleInfo { id: "kith-a".into(), name: "walls".into(), root: "/tmp".into() },
+                circle: CircleInfo { id: "wallsync-a".into(), name: "walls".into(), root: "/tmp".into() },
                 collection: COLLECTION.into(),
                 items: item_rows(&l, &BTreeSet::new(), false),
             },
@@ -2329,9 +2329,9 @@ mod tests {
                 device_full: None,
             }),
             circles: vec![CircleStatusRow {
-                id: "kith-4npq7x2b".into(),
+                id: "wallsync-4npq7x2b".into(),
                 name: "walls".into(),
-                root: "/home/ana/kith/walls".into(),
+                root: "/home/ana/wallsync/walls".into(),
                 state: None,
                 percent: None,
                 bytes_needed: None,
@@ -2353,7 +2353,7 @@ mod tests {
         assert!(rendered.contains("items     42"), "{rendered}");
         assert!(rendered.contains("presence unknown"), "{rendered}");
         assert!(
-            rendered.contains("no Membership claim yet, so kith cannot name the Person"),
+            rendered.contains("no Membership claim yet, so wallsync cannot name the Person"),
             "{rendered}"
         );
         assert!(rendered.contains("copies"), "conflicting copies are named: {rendered}");
@@ -2376,9 +2376,9 @@ mod tests {
                 device_full: Some(ANA_DEVICE.into()),
             }),
             circles: vec![CircleStatusRow {
-                id: "kith-4npq7x2b".into(),
+                id: "wallsync-4npq7x2b".into(),
                 name: "walls".into(),
-                root: "/home/ana/kith/walls".into(),
+                root: "/home/ana/wallsync/walls".into(),
                 state: Some("syncing".into()),
                 percent: None,
                 bytes_needed: Some(123_456_789),
@@ -2445,20 +2445,20 @@ mod tests {
     #[test]
     fn favourites_are_the_last_word_per_item_and_belong_to_one_circle() {
         let text = concat!(
-            r#"{"v":1,"k":"fav","seq":1,"at":"2026-08-07T10:41:00Z","circle":"kith-a","item":"A"}"#,
+            r#"{"v":1,"k":"fav","seq":1,"at":"2026-08-07T10:41:00Z","circle":"wallsync-a","item":"A"}"#,
             "\n",
-            r#"{"v":1,"k":"fav","seq":2,"at":"2026-08-07T10:42:00Z","circle":"kith-a","item":"B"}"#,
+            r#"{"v":1,"k":"fav","seq":2,"at":"2026-08-07T10:42:00Z","circle":"wallsync-a","item":"B"}"#,
             "\n",
-            r#"{"v":1,"k":"unfav","seq":3,"at":"2026-08-07T10:52:00Z","circle":"kith-a","item":"A"}"#,
+            r#"{"v":1,"k":"unfav","seq":3,"at":"2026-08-07T10:52:00Z","circle":"wallsync-a","item":"A"}"#,
             "\n",
-            r#"{"v":1,"k":"fav","seq":4,"at":"2026-08-07T10:53:00Z","circle":"kith-b","item":"C"}"#,
+            r#"{"v":1,"k":"fav","seq":4,"at":"2026-08-07T10:53:00Z","circle":"wallsync-b","item":"C"}"#,
             "\n",
             "{ not a record at all\n",
         );
 
-        let set = fold_favourites(text, "kith-a");
+        let set = fold_favourites(text, "wallsync-a");
         assert_eq!(set, BTreeSet::from(["B".to_string()]));
-        assert_eq!(fold_favourites(text, "kith-b"), BTreeSet::from(["C".to_string()]));
+        assert_eq!(fold_favourites(text, "wallsync-b"), BTreeSet::from(["C".to_string()]));
     }
 
     #[test]
@@ -2483,16 +2483,16 @@ mod tests {
         let known = KnownCircles {
             schema: 1,
             circle: vec![KnownCircle {
-                id: "kith-4tj2q9xa".into(),
+                id: "wallsync-4tj2q9xa".into(),
                 name: "walls".into(),
-                root: "/home/ana/kith/walls".into(),
+                root: "/home/ana/wallsync/walls".into(),
             }],
         };
         let text = toml::to_string_pretty(&known).unwrap();
         let back: KnownCircles = toml::from_str(&text).unwrap();
         assert_eq!(back.circle.len(), 1);
         assert_eq!(back.circle[0].name, "walls");
-        assert_eq!(back.circle[0].root, "/home/ana/kith/walls");
+        assert_eq!(back.circle[0].root, "/home/ana/wallsync/walls");
     }
 
     // ── reading a real tree ──────────────────────────────────────────
@@ -2500,7 +2500,7 @@ mod tests {
     #[test]
     fn a_circle_on_disk_reads_as_items_members_and_a_steward() {
         let root = std::env::temp_dir().join(format!(
-            "kith-report-{}-{}",
+            "wallsync-report-{}-{}",
             std::process::id(),
             ulid::Ulid::generate()
         ));

@@ -1,4 +1,4 @@
-//! The Sync Engine seam: everything above it speaks kith vocabulary, everything
+//! The Sync Engine seam: everything above it speaks wallsync vocabulary, everything
 //! below it may speak Syncthing.
 //!
 //! Methods return `impl Future + Send` rather than `async fn` because the core
@@ -19,7 +19,7 @@ pub trait SyncEngine: Send + Sync + 'static {
     /// Reachability plus version-floor check. Cheap; drives the status bar.
     fn health(&self) -> impl Future<Output = Result<EngineHealth, SyncError>> + Send;
 
-    /// This Device's engine identity. kith mints no device id of its own.
+    /// This Device's engine identity. wallsync mints no device id of its own.
     fn local_device(&self) -> impl Future<Output = Result<DeviceId, SyncError>> + Send;
 
     /// Globs the engine owns inside a Circle root, so engine artefact names never
@@ -33,8 +33,18 @@ pub trait SyncEngine: Send + Sync + 'static {
         root: &Path,
     ) -> impl Future<Output = Result<CircleRef, SyncError>> + Send;
 
-    /// Circles this engine replicates, whether kith created them or adopted them.
+    /// Circles this engine replicates, whether wallsync created them or adopted them.
     fn circles(&self) -> impl Future<Output = Result<Vec<CircleRef>, SyncError>> + Send;
+
+    /// Any space the engine already replicates at `root`, Circle or not.
+    ///
+    /// `circles()` deliberately answers only "spaces wallsync knows"; adoption has
+    /// to see the ones it does not, or it creates a second folder over a tree the
+    /// engine is already syncing.
+    fn replicated_at(
+        &self,
+        root: &Path,
+    ) -> impl Future<Output = Result<Option<CircleRef>, SyncError>> + Send;
 
     /// Joiner, phase 1: consume an Invite — register the introducer and knock.
     fn begin_join(

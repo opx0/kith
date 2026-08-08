@@ -1,10 +1,10 @@
-//! The four social verbs — `kith invite`, `kith join`, `kith approve`,
-//! `kith reject`.
+//! The four social verbs — `wallsync invite`, `wallsync join`, `wallsync approve`,
+//! `wallsync reject`.
 //!
 //! Admission is the one real gate, and it runs on the Steward's own Device. An
 //! Invite is a pointer, not a credential: expiry bounds when knocks are
 //! *expected*, never when they are possible, so v0.1 has no revoke. A Role is
-//! derived from `.kith/circle.toml`, so approving writes nothing into the synced
+//! derived from `.wallsync/circle.toml`, so approving writes nothing into the synced
 //! tree. Rejection is a local ignore-list that never leaves this Device.
 
 use std::io::{self, IsTerminal, Write};
@@ -33,7 +33,7 @@ const INVITES: &str = "invites.json";
 const KNOCKS: &str = "knocks.json";
 const DISMISSED: &str = "dismissed.json";
 
-// ── kith invite ──────────────────────────────────────────────────────
+// ── wallsync invite ──────────────────────────────────────────────────────
 
 /// Mint or reprint this Circle's single open Invite window, and print its code.
 ///
@@ -84,7 +84,7 @@ pub async fn invite(new: bool, address: Option<&str>) -> i32 {
                 save(&dir.join(INVITES), &windows);
             }
             if superseded.is_some() {
-                // stderr, so a piped `kith invite` carries only the code.
+                // stderr, so a piped `wallsync invite` carries only the code.
                 eprintln!("The previous window for {} is closed.", circle.name);
             }
             (minted, false)
@@ -107,7 +107,7 @@ pub async fn invite(new: bool, address: Option<&str>) -> i32 {
     EX_OK
 }
 
-/// The whole of `kith invite`'s output.
+/// The whole of `wallsync invite`'s output.
 ///
 /// Piped, the code goes to stdout bare and the prose to stderr. On a terminal
 /// the code also goes to the clipboard by OSC 52, which works over ssh.
@@ -145,12 +145,12 @@ fn print_invite(name: &str, code: &str, window: &Window, unix: i64, reprinted: b
     say("");
 
     if reprinted {
-        say("'kith invite --new' starts a fresh 24h window. The old code keeps pointing at your");
+        say("'wallsync invite --new' starts a fresh 24h window. The old code keeps pointing at your");
         say("Device either way; only the window changes.");
         return;
     }
 
-    say("Send it to one person over a channel you already trust. kith has no messaging and");
+    say("Send it to one person over a channel you already trust. wallsync has no messaging and");
     say("wants none.");
     say("");
     say(&format!(
@@ -159,16 +159,16 @@ fn print_invite(name: &str, code: &str, window: &Window, unix: i64, reprinted: b
     say("them, and you will see who is asking. There is no way to un-send it — it stops");
     say(&format!("being expected in {remaining}."));
     say("");
-    say("When they run 'kith join', their kith prints a fingerprint. Ask them to read it to");
+    say("When they run 'wallsync join', their wallsync prints a fingerprint. Ask them to read it to");
     say("you, and check it before you approve.");
 }
 
-// ── kith join ────────────────────────────────────────────────────────
+// ── wallsync join ────────────────────────────────────────────────────────
 
 /// Consume an Invite code: knock at the Steward's Device and wait to be admitted.
 ///
 /// Everything up to the knock is local. This build stops at the knock:
-/// completing a join needs the change feed, which arrives only while kith runs.
+/// completing a join needs the change feed, which arrives only while wallsync runs.
 pub async fn join(code: &str) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
 
@@ -183,12 +183,12 @@ pub async fn join(code: &str) -> i32 {
                 Some(ago) => eprintln!("This invite expired {ago} ago."),
                 None => eprintln!("This invite has expired."),
             }
-            eprintln!("Ask for a new one — 'kith invite' takes them a second.");
+            eprintln!("Ask for a new one — 'wallsync invite' takes them a second.");
             return EX_FAIL;
         }
         Err(InviteError::WrongVersion) => {
-            eprintln!("This invite code was made by a newer kith than this one.");
-            eprintln!("Update kith, or ask them for a code from a build that matches.");
+            eprintln!("This invite code was made by a newer wallsync than this one.");
+            eprintln!("Update wallsync, or ask them for a code from a build that matches.");
             return EX_USAGE;
         }
         // A truncating chat client is the likely cause: re-paste, do not re-issue.
@@ -198,7 +198,7 @@ pub async fn join(code: &str) -> i32 {
             return EX_USAGE;
         }
         Err(InviteError::Malformed) => {
-            eprintln!("That is not a kith invite code. One starts with KITH1- and is a single");
+            eprintln!("That is not a wallsync invite code. One starts with WALLSYNC1- and is a single");
             eprintln!("line of letters and digits.");
             return EX_USAGE;
         }
@@ -225,9 +225,9 @@ pub async fn join(code: &str) -> i32 {
     let root = join_root(&ticket.circle);
     if repeat.is_none() {
         println!("Join a Circle?");
-        println!("  Circle    {} — kith learns its name when its records arrive", ticket.circle.0);
+        println!("  Circle    {} — wallsync learns its name when its records arrive", ticket.circle.0);
         println!(
-            "  Steward   Device {} — kith cannot name the Person yet",
+            "  Steward   Device {} — wallsync cannot name the Person yet",
             fingerprint(&ticket.steward_device.0)
         );
         println!(
@@ -237,7 +237,7 @@ pub async fn join(code: &str) -> i32 {
         println!("  As        {} ({})", me.display_name, me.person.short());
         match &root {
             Some(r) => println!("  On disk   {}", r.display()),
-            None => println!("  On disk   kith has no data directory on this Device"),
+            None => println!("  On disk   wallsync has no data directory on this Device"),
         }
         println!();
         // No terminal means nobody to ask; refusing would only break scripts.
@@ -291,7 +291,7 @@ pub async fn join(code: &str) -> i32 {
                 .map(human_duration)
                 .unwrap_or_else(|| "a while".to_string());
             println!("You asked to join this Circle {waited} ago, and are still waiting.");
-            println!("kith has re-registered the request; nothing else changed.");
+            println!("wallsync has re-registered the request; nothing else changed.");
         }
         None => println!("Asked to join."),
     }
@@ -299,11 +299,11 @@ pub async fn join(code: &str) -> i32 {
     println!("  Your fingerprint   {}", fingerprint(&mine.0));
     println!("  Read it to them. They will see the same four-and-four before they approve.");
     println!();
-    println!("They have to approve you on their own Device. kith cannot tell you whether they");
+    println!("They have to approve you on their own Device. wallsync cannot tell you whether they");
     println!("have looked — there is no server that would — and nothing arrives until they do.");
     println!();
     println!("Your request stays registered with the Sync Engine across restarts. Run");
-    println!("'kith join <code>' again, or open kith, to pick it up.");
+    println!("'wallsync join <code>' again, or open wallsync, to pick it up.");
     EX_OK
 }
 
@@ -344,7 +344,7 @@ async fn place_circle(
     println!("Joined {} at {}.", display_name(name, &offer.circle), circle.root.display());
     println!();
     println!("Content arrives as it syncs. Nothing touches your screen until you press Apply.");
-    println!("Open kith to watch it land.");
+    println!("Open wallsync to watch it land.");
     EX_OK
 }
 
@@ -366,7 +366,7 @@ fn join_root(circle: &CircleId) -> Option<PathBuf> {
     circles_dir().map(|d| d.join(circle.0.to_lowercase()))
 }
 
-// ── kith approve ─────────────────────────────────────────────────────
+// ── wallsync approve ─────────────────────────────────────────────────────
 
 /// Admit a knocking Device into the Circle this Person stewards.
 ///
@@ -428,8 +428,8 @@ pub async fn approve(device: Option<&str>) -> i32 {
     }
     println!("  Invite         {}", solicited.line(unix, &circle.name));
     println!();
-    println!("kith cannot tell you who this is. It sees a Device, not a Person. Ask your friend to");
-    println!("read you the fingerprint their kith printed, and approve only if it matches.");
+    println!("wallsync cannot tell you who this is. It sees a Device, not a Person. Ask your friend to");
+    println!("read you the fingerprint their wallsync printed, and approve only if it matches.");
     println!();
     println!("Eight characters is enough to tell two Devices apart and to catch a mistake reading");
     println!("one back; it is not enough to resist someone deliberately grinding a matching");
@@ -439,7 +439,7 @@ pub async fn approve(device: Option<&str>) -> i32 {
 
     if !io::stdin().is_terminal() {
         eprintln!("Approving is deliberate, and v0.1 has no flag that skips the question.");
-        eprintln!("Run 'kith approve' from a terminal.");
+        eprintln!("Run 'wallsync approve' from a terminal.");
         return EX_USAGE;
     }
     let agreed = match &solicited {
@@ -451,7 +451,7 @@ pub async fn approve(device: Option<&str>) -> i32 {
         }
     };
     if !agreed {
-        println!("Nothing was admitted. The Device keeps knocking; 'kith reject' hides it.");
+        println!("Nothing was admitted. The Device keeps knocking; 'wallsync reject' hides it.");
         return EX_OK;
     }
 
@@ -470,20 +470,20 @@ pub async fn approve(device: Option<&str>) -> i32 {
 
     println!();
     println!(
-        "Admitted {} to {}. The invite is used up; 'kith invite' issues another.",
+        "Admitted {} to {}. The invite is used up; 'wallsync invite' issues another.",
         fingerprint(&request.device.0),
         circle.name
     );
     println!("Nothing was written into the Circle: a Role is derived from who founded it, so");
     println!("there is no shared record of who is who for an approval to change.");
-    println!("They publish their own Membership claim when their kith places the Circle — that");
-    println!("is when kith can name the Person behind that Device, and not before.");
+    println!("They publish their own Membership claim when their wallsync places the Circle — that");
+    println!("is when wallsync can name the Person behind that Device, and not before.");
     println!("Every other Member learns their Device the next time their Device and yours are");
     println!("connected to each other.");
     EX_OK
 }
 
-// ── kith reject ──────────────────────────────────────────────────────
+// ── wallsync reject ──────────────────────────────────────────────────────
 
 /// Hide a knocking Device. Local, and told to nobody.
 ///
@@ -538,7 +538,7 @@ pub async fn reject(device: Option<&str>) -> i32 {
         Err(e) => match device.filter(|d| looks_like_a_device_identity(d)) {
             Some(d) => d.to_string(),
             None => {
-                eprintln!("kith cannot list who is knocking without the Sync Engine.");
+                eprintln!("wallsync cannot list who is knocking without the Sync Engine.");
                 eprintln!("  {}", engine_reason(e));
                 eprintln!("Hiding one still works if you name its whole Device Identity.");
                 return EX_UNAVAILABLE;
@@ -562,7 +562,7 @@ pub async fn reject(device: Option<&str>) -> i32 {
     }
 
     println!(
-        "Hidden. {} keeps trying to reach your Device — kith stops showing it.",
+        "Hidden. {} keeps trying to reach your Device — wallsync stops showing it.",
         fingerprint(&target)
     );
     println!("It is not told anything: there is no server to deliver a \"no\". If someone is");
@@ -570,7 +570,7 @@ pub async fn reject(device: Option<&str>) -> i32 {
     match &where_ {
         // No `--forget` in v0.1, so the un-hide is the file itself.
         Some(path) => println!("Recorded in {} — remove its line to un-hide it.", path.display()),
-        None => println!("kith has no state directory on this Device, so this will not survive a restart."),
+        None => println!("wallsync has no state directory on this Device, so this will not survive a restart."),
     }
     EX_OK
 }
@@ -588,7 +588,7 @@ fn choose<'a>(
     let hidden_note = |code: i32| {
         if hidden_here > 0 {
             eprintln!(
-                "{hidden_here} hidden knock{} — kith stops showing a Device you rejected.",
+                "{hidden_here} hidden knock{} — wallsync stops showing a Device you rejected.",
                 if hidden_here == 1 { "" } else { "s" }
             );
         }
@@ -705,7 +705,7 @@ async fn held_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<Held> {
     found
 }
 
-/// The Circles kith itself placed, read straight off this Device — no daemon.
+/// The Circles wallsync itself placed, read straight off this Device — no daemon.
 fn local_circles() -> Vec<Held> {
     let mut found: Vec<Held> = Vec::new();
     let Some(dir) = circles_dir() else {
@@ -765,19 +765,19 @@ fn read_held(root: &Path, label: Option<&str>, engine_id: Option<&str>) -> Held 
 
 /// Choose the Circle a verb acts on.
 ///
-/// v0.1's CLI has no `--circle`, and kith refuses to guess between several:
+/// v0.1's CLI has no `--circle`, and wallsync refuses to guess between several:
 /// admitting a Device to the wrong Circle is real and irreversible.
 fn pick(mut circles: Vec<Held>, verb: &str) -> Result<Held, i32> {
     match circles.len() {
         1 => Ok(circles.remove(0)),
         0 => {
             eprintln!("You are not in any Circle yet.");
-            eprintln!("'kith create <name>' starts one, or 'kith join <code>' joins a friend's.");
+            eprintln!("'wallsync create <name>' starts one, or 'wallsync join <code>' joins a friend's.");
             Err(EX_FAIL)
         }
         _ => {
-            eprintln!("More than one Circle is on this Device, and 'kith {verb}' has no way to");
-            eprintln!("choose between them in v0.1. kith will not guess which one you mean:");
+            eprintln!("More than one Circle is on this Device, and 'wallsync {verb}' has no way to");
+            eprintln!("choose between them in v0.1. wallsync will not guess which one you mean:");
             for c in &circles {
                 eprintln!(
                     "  {}  {}  {}",
@@ -833,7 +833,7 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
     match stewardship(c) {
         Stewardship::Unknown => {
             eprintln!("{} · waiting for the Circle's records", c.name);
-            eprintln!("kith has this Circle's bytes and not its `.kith/circle.toml`, so it cannot");
+            eprintln!("wallsync has this Circle's bytes and not its `.wallsync/circle.toml`, so it cannot");
             eprintln!("say who its admin is. Content keeps syncing; membership waits.");
             Err(EX_FAIL)
         }
@@ -842,7 +842,7 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
             for who in &claimants {
                 eprintln!("  {}", name_person(c, who));
             }
-            eprintln!("Two Devices have each written the record that names the founder. kith will");
+            eprintln!("Two Devices have each written the record that names the founder. wallsync will");
             eprintln!("not pick a winner; resolving it lands in v0.2.");
             Err(EX_FAIL)
         }
@@ -865,7 +865,7 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
                         "Only {}'s admin ({named}) can invite people or approve joins. Ask them to",
                         c.name
                     );
-                    eprintln!("run 'kith invite'. kith refuses this on your Device — it cannot stop other");
+                    eprintln!("run 'wallsync invite'. wallsync refuses this on your Device — it cannot stop other");
                     eprintln!("software on your Device from doing something similar, and it will not");
                     eprintln!("pretend otherwise.");
                 }
@@ -876,13 +876,13 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
                         c.name,
                         short_person(&person)
                     );
-                    eprintln!("kith refuses this on your Device — it cannot stop other software on your");
+                    eprintln!("wallsync refuses this on your Device — it cannot stop other software on your");
                     eprintln!("Device from doing something similar, and it will not pretend otherwise.");
                 }
             }
             if verb != "invite" {
                 eprintln!();
-                eprintln!("A knock only ever reaches the admin's own Device. kith is not hiding");
+                eprintln!("A knock only ever reaches the admin's own Device. wallsync is not hiding");
                 eprintln!("pending joins from you — they never arrive here.");
             }
             Err(EX_FAIL)
@@ -897,13 +897,13 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
 /// Who a Circle's admin is, as its records say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Stewardship {
-    /// `.kith/circle.toml` names a founder whose claims do not all say they left.
+    /// `.wallsync/circle.toml` names a founder whose claims do not all say they left.
     Held { person: String, device: String },
     /// The founder stamped `left_at` into their own Device's Membership claim.
     Vacant { since: String, was: String },
-    /// Copies of `.kith/circle.toml` disagree about `founder_person`.
+    /// Copies of `.wallsync/circle.toml` disagree about `founder_person`.
     Disputed { claimants: Vec<String> },
-    /// No readable `.kith/circle.toml` in the tree yet.
+    /// No readable `.wallsync/circle.toml` in the tree yet.
     Unknown,
 }
 
@@ -951,12 +951,12 @@ fn stewardship(c: &Held) -> Stewardship {
     }
 }
 
-/// Copies of `.kith/circle.toml` the transport left beside it.
+/// Copies of `.wallsync/circle.toml` the transport left beside it.
 ///
 /// Recognised by the format's own rule — the key is the segment before the first
 /// dot — so the engine's spelling for a conflict copy stays below the seam.
 fn descriptor_copies(root: &Path) -> Vec<CircleDescriptor> {
-    let dir = descriptors::kith_dir(root);
+    let dir = descriptors::wallsync_dir(root);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -1000,19 +1000,19 @@ fn short_person(person: &str) -> String {
     person.chars().take(8).collect()
 }
 
-/// `$XDG_DATA_HOME/kith/circles` — where a Circle goes unless a path was named.
+/// `$XDG_DATA_HOME/wallsync/circles` — where a Circle goes unless a path was named.
 fn circles_dir() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|b| b.data_dir().join("kith/circles"))
+    directories::BaseDirs::new().map(|b| b.data_dir().join("wallsync/circles"))
 }
 
 // ── the same three records, for the TUI ──────────────────────────────
 //
-// The Members screen decides what `kith approve` and `kith reject` decide, on
+// The Members screen decides what `wallsync approve` and `wallsync reject` decide, on
 // the same three files. Quiet by construction: `eprintln!` corrupts the frame.
 
 /// Whether this Device has an invite window open, as the Members screen renders it.
 ///
-/// A window kith cannot read reads as `Unsolicited`, so the knock needs its
+/// A window wallsync cannot read reads as `Unsolicited`, so the knock needs its
 /// fingerprint typed out in full. Safe, and noisier.
 pub fn open_window(circle: &str) -> crate::tui::members::Solicited {
     use crate::tui::members::{Solicited as Shown, WindowClose};
@@ -1186,13 +1186,13 @@ fn solicited(windows: &[Window], circle: &str, now: i64) -> Solicited {
     }
 }
 
-/// `$XDG_STATE_HOME/kith` — machine-written state, not the Person's config.
+/// `$XDG_STATE_HOME/wallsync` — machine-written state, not the Person's config.
 fn state_dir() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
     Some(
         base.state_dir()
             .unwrap_or_else(|| base.data_dir())
-            .join("kith"),
+            .join("wallsync"),
     )
 }
 
@@ -1246,7 +1246,7 @@ fn me() -> Option<Identity> {
     match identity::load() {
         Ok(Some(id)) => Some(id),
         Ok(None) => {
-            eprintln!("No Identity on this Device. Run 'kith init' and give kith a name to attach");
+            eprintln!("No Identity on this Device. Run 'wallsync init' and give wallsync a name to attach");
             eprintln!("to what you add.");
             None
         }
@@ -1258,7 +1258,7 @@ fn me() -> Option<Identity> {
 }
 
 /// A Sync Engine handle that is known to answer. Credentials come from the
-/// daemon's own configuration, overridden by `config.toml`; kith writes neither.
+/// daemon's own configuration, overridden by `config.toml`; wallsync writes neither.
 async fn reach_engine() -> Result<SyncthingEngine, SyncError> {
     let cfg = config::load();
     let creds = match SyncthingEngine::discover() {
@@ -1289,24 +1289,24 @@ async fn reach_engine() -> Result<SyncthingEngine, SyncError> {
 fn engine_reason(e: &SyncError) -> String {
     match e {
         SyncError::Unreachable => {
-            "The Sync Engine is not running, or kith cannot find its configuration.".to_string()
+            "The Sync Engine is not running, or wallsync cannot find its configuration.".to_string()
         }
         SyncError::Unauthorized => {
-            "The Sync Engine rejected our credentials. kith never rewrites the daemon's config \
+            "The Sync Engine rejected our credentials. wallsync never rewrites the daemon's config \
              — check its API key."
                 .to_string()
         }
         SyncError::Incompatible(v) => {
-            format!("The Sync Engine is version {v}, below the version kith needs.")
+            format!("The Sync Engine is version {v}, below the version wallsync needs.")
         }
         other => format!("The Sync Engine answered with a problem: {other}"),
     }
 }
 
-/// Every engine failure is exit 69: kith does not queue engine writes.
+/// Every engine failure is exit 69: wallsync does not queue engine writes.
 fn refuse_engine(e: &SyncError) -> i32 {
     eprintln!("{}", engine_reason(e));
-    eprintln!("kith adapts a daemon you run; it never starts, embeds or configures one.");
+    eprintln!("wallsync adapts a daemon you run; it never starts, embeds or configures one.");
     EX_UNAVAILABLE
 }
 
@@ -1425,7 +1425,7 @@ mod tests {
     /// A scratch directory of our own, never the Person's home.
     fn scratch(label: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join("kith-membership-tests")
+            .join("wallsync-membership-tests")
             .join(format!("{label}-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         dir
@@ -1434,7 +1434,7 @@ mod tests {
     fn descriptor(founder: &str) -> CircleDescriptor {
         CircleDescriptor {
             schema: 1,
-            id: "kith-4tj2q9xa".into(),
+            id: "wallsync-4tj2q9xa".into(),
             name: "walls".into(),
             created: "2026-08-07T09:02:11Z".into(),
             founder_person: founder.into(),
@@ -1475,7 +1475,7 @@ mod tests {
     }
 
     fn put_claim(root: &Path, c: &MembershipClaim) {
-        let dir = root.join(".kith/members");
+        let dir = root.join(".wallsync/members");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(format!("{}.toml", c.device)),
@@ -1524,7 +1524,7 @@ mod tests {
 
     fn window(expires_at: i64, state: WindowState) -> Window {
         Window {
-            circle: "kith-4tj2q9xa".into(),
+            circle: "wallsync-4tj2q9xa".into(),
             nonce: "01K1YFQ2M7VJ3W8T0PZ4RXAB6C".into(),
             issued_at: "2026-08-07T09:02:11Z".into(),
             expires_at,
@@ -1549,23 +1549,23 @@ mod tests {
     fn a_knock_is_solicited_by_the_window_that_is_open_now() {
         let open = vec![window(1_000, WindowState::Open)];
         assert_eq!(
-            solicited(&open, "kith-4tj2q9xa", 500),
+            solicited(&open, "wallsync-4tj2q9xa", 500),
             Solicited::ByOpenInvite {
                 issued_at: "2026-08-07T09:02:11Z".into(),
                 expires_at: 1_000
             }
         );
         assert_eq!(
-            solicited(&open, "kith-4tj2q9xa", 2_000),
+            solicited(&open, "wallsync-4tj2q9xa", 2_000),
             Solicited::ByClosedInvite(WindowState::Expired)
         );
         assert_eq!(
-            solicited(&[window(1_000, WindowState::Spent)], "kith-4tj2q9xa", 500),
+            solicited(&[window(1_000, WindowState::Spent)], "wallsync-4tj2q9xa", 500),
             Solicited::ByClosedInvite(WindowState::Spent)
         );
-        assert_eq!(solicited(&[], "kith-4tj2q9xa", 500), Solicited::Unsolicited);
+        assert_eq!(solicited(&[], "wallsync-4tj2q9xa", 500), Solicited::Unsolicited);
         assert_eq!(
-            solicited(&open, "kith-somewhere-else", 500),
+            solicited(&open, "wallsync-somewhere-else", 500),
             Solicited::Unsolicited
         );
     }
@@ -1573,7 +1573,7 @@ mod tests {
     #[test]
     fn the_invite_line_never_claims_more_than_the_window_knows() {
         let now = 500;
-        let open = solicited(&[window(now + 3_600, WindowState::Open)], "kith-4tj2q9xa", now);
+        let open = solicited(&[window(now + 3_600, WindowState::Open)], "wallsync-4tj2q9xa", now);
         assert!(open.line(now, "walls").starts_with("open, "));
         assert!(open.line(now, "walls").contains("expires in 1h"));
         assert_eq!(
@@ -1618,7 +1618,7 @@ mod tests {
         let windows: Vec<Window> = read_state(&path);
         assert!(windows.is_empty());
         assert_eq!(
-            solicited(&windows, "kith-4tj2q9xa", 0),
+            solicited(&windows, "wallsync-4tj2q9xa", 0),
             Solicited::Unsolicited
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1627,16 +1627,16 @@ mod tests {
     #[test]
     fn a_dismissal_hides_one_device_in_one_circle_and_nothing_else() {
         let hidden = [Dismissal {
-            circle: "kith-4tj2q9xa".into(),
+            circle: "wallsync-4tj2q9xa".into(),
             device: ANA_DEVICE.into(),
             rejected_at: "2026-08-07T09:02:11Z".into(),
         }];
         let hides = |circle: &str, device: &str| {
             hidden.iter().any(|h| h.circle == circle && h.device == device)
         };
-        assert!(hides("kith-4tj2q9xa", ANA_DEVICE));
-        assert!(!hides("kith-4tj2q9xa", BEN_DEVICE), "one Device, not a class");
-        assert!(!hides("kith-elsewhere", ANA_DEVICE), "one Circle, not all");
+        assert!(hides("wallsync-4tj2q9xa", ANA_DEVICE));
+        assert!(!hides("wallsync-4tj2q9xa", BEN_DEVICE), "one Device, not a class");
+        assert!(!hides("wallsync-elsewhere", ANA_DEVICE), "one Circle, not all");
     }
 
     // ── stewardship ──────────────────────────────────────────────────
@@ -1704,7 +1704,7 @@ mod tests {
         let mut theirs = descriptor(ben);
         theirs.founder_device = BEN_DEVICE.into();
         std::fs::write(
-            descriptors::kith_dir(&root).join("circle.sync-conflict-20260807-143122-K5J2FVL.toml"),
+            descriptors::wallsync_dir(&root).join("circle.sync-conflict-20260807-143122-K5J2FVL.toml"),
             toml::to_string_pretty(&theirs).unwrap(),
         )
         .unwrap();
@@ -1726,7 +1726,7 @@ mod tests {
         let ana = "p-01k1yfq2m7vj3w8t0pz4rxab6c";
         write_circle(&root, &descriptor(ana)).unwrap();
         std::fs::write(
-            descriptors::kith_dir(&root).join("circle.sync-conflict-20260807-143122-K5J2FVL.toml"),
+            descriptors::wallsync_dir(&root).join("circle.sync-conflict-20260807-143122-K5J2FVL.toml"),
             toml::to_string_pretty(&descriptor(ana)).unwrap(),
         )
         .unwrap();
@@ -1758,12 +1758,12 @@ mod tests {
     }
 
     #[test]
-    fn kith_refuses_to_guess_between_two_circles() {
+    fn wallsync_refuses_to_guess_between_two_circles() {
         let (a, b) = (scratch("pick-a"), scratch("pick-b"));
         let ana = "p-01k1yfq2m7vj3w8t0pz4rxab6c";
         write_circle(&a, &descriptor(ana)).unwrap();
         let mut other = descriptor(ana);
-        other.id = "kith-9pq3zx71".into();
+        other.id = "wallsync-9pq3zx71".into();
         other.name = "photos".into();
         write_circle(&b, &other).unwrap();
 
@@ -1810,7 +1810,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stamp_kith_cannot_read_is_printed_rather_than_guessed_at() {
+    fn a_stamp_wallsync_cannot_read_is_printed_rather_than_guessed_at() {
         assert_eq!(short_date("last tuesday"), "last tuesday");
         assert!(since("last tuesday").is_none());
         assert!(local_time(1_786_000_000).is_some());
@@ -1825,7 +1825,7 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-        assert_eq!(base64(b"KITH1-AH6BTS5I"), "S0lUSDEtQUg2QlRTNUk=");
+        assert_eq!(base64(b"WALLSYNC1-AH6BTS5I"), "V0FMTFNZTkMxLUFINkJUUzVJ");
     }
 
     #[test]

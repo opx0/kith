@@ -1,10 +1,10 @@
-//! `kith add <PATH>…` — the only way bytes become Items in v0.1.
+//! `wallsync add <PATH>…` — the only way bytes become Items in v0.1.
 //!
 //! The module owns one question: *what should enter this Collection, and what
 //! should be refused.* Everything it writes is one `add` record per accepted
 //! candidate. Four decisions hold the flow up:
 //!
-//! * **Copy, never move.** A bad `kith add` is undone by removing Items; a bad
+//! * **Copy, never move.** A bad `wallsync add` is undone by removing Items; a bad
 //!   move is undone by nothing.
 //! * **Register in place** when the path is already inside the Circle root — no
 //!   copy, no rename, no byte movement.
@@ -79,7 +79,7 @@ const ENOSPC: i32 = 28;
 /// and `--yes` are not in this build's signature.
 pub async fn run(paths: &[String]) -> i32 {
     if paths.is_empty() {
-        eprintln!("kith add <PATH>… — the wallpapers to bring into this Circle");
+        eprintln!("wallsync add <PATH>… — the wallpapers to bring into this Circle");
         return EX_USAGE;
     }
 
@@ -94,7 +94,7 @@ pub async fn run(paths: &[String]) -> i32 {
     match tokio::task::spawn_blocking(move || import(&job, &sources)).await {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("kith add: the import task did not finish: {e}");
+            eprintln!("wallsync add: the import task did not finish: {e}");
             EX_INTERNAL
         }
     }
@@ -114,7 +114,7 @@ struct Job {
     /// The Person every record is attributed to. Asserted, never proven.
     person: PersonId,
     /// Every *other* Circle root this Device holds, excluded from recursion so
-    /// `kith add ~/Pictures` cannot swallow a Circle that lives inside it.
+    /// `wallsync add ~/Pictures` cannot swallow a Circle that lives inside it.
     other_roots: Vec<PathBuf>,
     /// The globs the Sync Engine owns inside a Circle root, consumed as data.
     reserved: Vec<&'static str>,
@@ -131,30 +131,30 @@ async fn resolve() -> Result<Job, i32> {
     let identity = match identity::load() {
         Ok(Some(id)) => id,
         Ok(None) => {
-            eprintln!("kith add: this Device has no Identity yet");
-            eprintln!("  → Run: kith init <your name>");
+            eprintln!("wallsync add: this Device has no Identity yet");
+            eprintln!("  → Run: wallsync init <your name>");
             return Err(EX_USAGE);
         }
         Err(e) => {
-            eprintln!("kith add: {e}");
+            eprintln!("wallsync add: {e}");
             return Err(EX_USAGE);
         }
     };
 
     let creds = SyncthingEngine::discover().map_err(|e| {
-        eprintln!("kith add: no Sync Engine configuration found ({e})");
-        eprintln!("  → Run: kith doctor");
+        eprintln!("wallsync add: no Sync Engine configuration found ({e})");
+        eprintln!("  → Run: wallsync doctor");
         EX_UNAVAILABLE
     })?;
     let engine = SyncthingEngine::new(creds);
 
     let circles = engine.circles().await.map_err(|e| {
-        eprintln!("kith add: the Sync Engine did not answer ({e})");
-        eprintln!("  → kith adapts a daemon you run; start it, then run: kith doctor");
+        eprintln!("wallsync add: the Sync Engine did not answer ({e})");
+        eprintln!("  → wallsync adapts a daemon you run; start it, then run: wallsync doctor");
         EX_UNAVAILABLE
     })?;
     let device = engine.local_device().await.map_err(|e| {
-        eprintln!("kith add: the Sync Engine could not name this Device ({e})");
+        eprintln!("wallsync add: the Sync Engine could not name this Device ({e})");
         EX_UNAVAILABLE
     })?;
 
@@ -163,12 +163,12 @@ async fn resolve() -> Result<Job, i32> {
     let chosen = match circles.len() {
         1 => circles[0].clone(),
         0 => {
-            eprintln!("kith add: you are in no Circles yet");
-            eprintln!("  → Run: kith create <name>, or join one with an Invite");
+            eprintln!("wallsync add: you are in no Circles yet");
+            eprintln!("  → Run: wallsync create <name>, or join one with an Invite");
             return Err(EX_USAGE);
         }
         n => {
-            eprintln!("kith add: you are in {n} Circles; this build cannot be told which one");
+            eprintln!("wallsync add: you are in {n} Circles; this build cannot be told which one");
             for c in &circles {
                 eprintln!("    {}", label(&c.name, &c.id.0));
             }
@@ -177,12 +177,12 @@ async fn resolve() -> Result<Job, i32> {
     };
     let root = chosen.root.clone();
 
-    // An adopted Circle whose Steward's Device has not run kith yet has no
+    // An adopted Circle whose Steward's Device has not run wallsync yet has no
     // descriptor: the v0.1 literals stand in and the gap is said out loud.
     let descriptor = match descriptors::read_collections(&root) {
         Ok(found) => found,
         Err(e) => {
-            eprintln!("kith add: {e}");
+            eprintln!("wallsync add: {e}");
             return Err(EX_DATA);
         }
     };
@@ -218,7 +218,7 @@ async fn resolve() -> Result<Job, i32> {
     if provider_id != WALLPAPER {
         // No file is imported, so the Collection stays empty rather than wrong.
         eprintln!(
-            "kith add: this Collection uses the \"{provider_id}\" Provider, which this version \
+            "wallsync add: this Collection uses the \"{provider_id}\" Provider, which this version \
              does not have"
         );
         return Err(EX_DATA);
@@ -312,7 +312,7 @@ fn import(job: &Job, sources: &[PathBuf]) -> i32 {
             job.circle_name
         );
         if !job.interactive {
-            eprintln!("kith add: {question}");
+            eprintln!("wallsync add: {question}");
             eprintln!("  → Run it from a terminal so it can be confirmed. Nothing was copied.");
             return EX_USAGE;
         }
@@ -326,7 +326,7 @@ fn import(job: &Job, sources: &[PathBuf]) -> i32 {
     let free = free_bytes(&job.root);
     if !fits(plan.import_bytes, free) {
         eprintln!(
-            "kith add: importing {} Items needs {}; {} has {} free. Nothing was copied.",
+            "wallsync add: importing {} Items needs {}; {} has {} free. Nothing was copied.",
             plan.import_count,
             bytes(plan.import_bytes),
             job.root.display(),
@@ -483,7 +483,7 @@ fn unreadable(source: PathBuf, error: String) -> Entry {
 fn collect(job: &Job, sources: &[PathBuf], out: &mut Vec<Found>, refused: &mut Vec<Entry>) {
     for source in sources {
         // A symlink *argument* imports its target's bytes and leaves the link
-        // alone; one found during recursion is skipped. kith does not sync links.
+        // alone; one found during recursion is skipped. wallsync does not sync links.
         let meta = match fs::metadata(source) {
             Ok(m) => m,
             Err(e) => {
@@ -533,7 +533,7 @@ fn walk(job: &Job, dir: &Path, prefix: &mut Vec<String>, out: &mut Vec<Found>, r
     names.sort();
 
     for name in names {
-        // Dot-entries at any depth: `.kith/` and every dot-named engine artefact.
+        // Dot-entries at any depth: `.wallsync/` and every dot-named engine artefact.
         if name.starts_with('.') {
             continue;
         }
@@ -702,7 +702,7 @@ impl Placer {
     }
 }
 
-/// Make a filename kith is willing to write.
+/// Make a filename wallsync is willing to write.
 ///
 /// No NFC normalisation: no crate for it is in this build, so two names differing
 /// only by composition land as two files rather than as one collision.
@@ -724,7 +724,7 @@ fn sanitise(name: &str, fallback_stem: &str) -> String {
     truncate_name(&cleaned, 255)
 }
 
-/// 255 bytes is the filename limit on every filesystem kith targets; the
+/// 255 bytes is the filename limit on every filesystem wallsync targets; the
 /// extension is preserved.
 fn truncate_name(name: &str, limit: usize) -> String {
     if name.len() <= limit {
@@ -1139,7 +1139,7 @@ fn render(job: &Job, report: &Report) -> i32 {
     }
 
     if let Some(halted) = &report.halted {
-        eprintln!("kith add: {halted}");
+        eprintln!("wallsync add: {halted}");
         return EX_FAIL;
     }
     if !report.unreadable.is_empty() {
@@ -1165,8 +1165,8 @@ fn confirm(question: &str) -> bool {
 // ── small facts about the filesystem ─────────────────────────────────
 
 fn staging_dir(root: &Path) -> PathBuf {
-    // `.kith/local` never syncs, which is exactly why staging lives in it.
-    descriptors::kith_dir(root).join("local").join("incoming")
+    // `.wallsync/local` never syncs, which is exactly why staging lives in it.
+    descriptors::wallsync_dir(root).join("local").join("incoming")
 }
 
 /// Unlink staged bytes left behind by a crashed run.
@@ -1250,7 +1250,7 @@ fn free_bytes(path: &Path) -> Option<u64> {
         return None;
     }
     // Blocks available to an unprivileged process, times the fragment size —
-    // never the total, which includes the root reserve kith cannot use.
+    // never the total, which includes the root reserve wallsync cannot use.
     let unit = if out.f_frsize > 0 { out.f_frsize } else { out.f_bsize };
     out.f_bavail.checked_mul(unit)
 }
@@ -1272,7 +1272,7 @@ mod tests {
     /// A scratch tree under the system temp directory, never the Person's home.
     fn scratch(label: &str) -> PathBuf {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("kith-add-{}-{n}-{label}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wallsync-add-{}-{n}-{label}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1531,7 +1531,7 @@ mod tests {
 
         wallpaper(&home.join("keep.png"), 4, 4);
         wallpaper(&home.join(".hidden.png"), 4, 4);
-        wallpaper(&home.join(".kith/inside.png"), 4, 4);
+        wallpaper(&home.join(".wallsync/inside.png"), 4, 4);
         wallpaper(&home.join(".stversions/old.png"), 4, 4);
         wallpaper(&home.join("keep.sync-conflict-20260807-091402-K5J2FVL.png"), 4, 4);
         #[cfg(unix)]
@@ -1559,7 +1559,7 @@ mod tests {
         let landed = root.join("pointer.png");
         assert!(
             fs::symlink_metadata(&landed).unwrap().is_file(),
-            "bytes, never a link — kith does not sync links"
+            "bytes, never a link — wallsync does not sync links"
         );
         assert!(fs::symlink_metadata(home.join("pointer.png")).unwrap().file_type().is_symlink());
     }
@@ -1593,7 +1593,7 @@ mod tests {
 
         assert_eq!(import(&job, &[home.join("sunset.png")]), EX_OK);
         // `Sunset.png` beside `sunset.png` is a permanent conflict on a Device
-        // with a case-insensitive filesystem, so kith never creates the pair.
+        // with a case-insensitive filesystem, so wallsync never creates the pair.
         assert!(!root.join("sunset.png").exists());
         assert!(root.join("sunset-2.png").is_file());
     }
@@ -1703,7 +1703,7 @@ mod tests {
         assert_eq!(sniff(b"\xFF\xD8\xFFrest").as_deref(), Some("image/jpeg"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 ").as_deref(), Some("image/webp"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WAVEfmt "), None, "a RIFF is not an image");
-        // Text-shaped formats have no magic number, and kith invents none.
+        // Text-shaped formats have no magic number, and wallsync invents none.
         assert_eq!(sniff(b"<?xml version=\"1.0\"?><svg"), None);
         assert_eq!(sniff(b""), None);
     }

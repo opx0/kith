@@ -1,4 +1,4 @@
-//! Membership claims — one file per Device, at `.kith/members/<device-id>.toml`.
+//! Membership claims — one file per Device, at `.wallsync/members/<device-id>.toml`.
 //!
 //! **Single writer:** the filename is the key, and the Device it names is the only
 //! Device that ever writes that file — so two Members never race on one path.
@@ -23,7 +23,7 @@ use crate::store::descriptors::write_atomic;
 const SCHEMA: u32 = 1;
 
 /// Where a Circle keeps its Membership claims, relative to the Circle root.
-const MEMBERS_DIR: &str = ".kith/members";
+const MEMBERS_DIR: &str = ".wallsync/members";
 
 fn members_dir(root: &Path) -> PathBuf {
     root.join(MEMBERS_DIR)
@@ -67,7 +67,7 @@ pub fn publish(root: &Path, device: &str, id: &Identity, now: &str) -> io::Resul
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
-                    "{} was written by a newer kith (schema {}) — reading it, never rewriting it",
+                    "{} was written by a newer wallsync (schema {}) — reading it, never rewriting it",
                     copy.path.display(),
                     claim.schema
                 ),
@@ -132,7 +132,7 @@ pub fn stamp_left(root: &Path, device: &str, now: &str) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!(
-                "{} was written by a newer kith (schema {}) — reading it, never rewriting it",
+                "{} was written by a newer wallsync (schema {}) — reading it, never rewriting it",
                 path.display(),
                 claim.schema
             ),
@@ -237,7 +237,7 @@ struct Copy {
     canonical: bool,
 }
 
-/// Every file in `.kith/members` that belongs to one Device: `<device>.toml` and
+/// Every file in `.wallsync/members` that belongs to one Device: `<device>.toml` and
 /// any `*.sync-conflict-*` copy of it.
 fn copies_of(dir: &Path, device: &str) -> io::Result<Vec<Copy>> {
     let entries = match std::fs::read_dir(dir) {
@@ -267,7 +267,7 @@ fn copies_of(dir: &Path, device: &str) -> io::Result<Vec<Copy>> {
 /// The Device a claim filename names: the segment before the first `.`.
 ///
 /// That is what makes a conflict copy readable as the same claim, and requiring
-/// `.toml` is what keeps the `.toml.kith-tmp` staging file out of every read.
+/// `.toml` is what keeps the `.toml.wallsync-tmp` staging file out of every read.
 fn claim_file_device(name: &str) -> Option<&str> {
     if !name.ends_with(".toml") {
         return None;
@@ -305,7 +305,7 @@ fn supersedes_copy(candidate: (&MembershipClaim, bool), held: (&MembershipClaim,
 /// `asserted` parsed for comparison, because `…:02Z` and `…:02.117Z` sort
 /// backwards as strings.
 ///
-/// `None` sorts oldest, so a claim kith cannot date never wins a freshness tie.
+/// `None` sorts oldest, so a claim wallsync cannot date never wins a freshness tie.
 fn asserted_at(claim: &MembershipClaim) -> Option<jiff::Timestamp> {
     claim.asserted.parse::<jiff::Timestamp>().ok()
 }
@@ -339,7 +339,7 @@ mod tests {
     /// A Circle root of our own, never the Person's home.
     fn circle(name: &str) -> PathBuf {
         let root = std::env::temp_dir()
-            .join("kith-claims-tests")
+            .join("wallsync-claims-tests")
             .join(format!("{name}-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(root.join(MEMBERS_DIR)).unwrap();
         root
@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_never_rewrites_a_claim_from_a_newer_kith() {
+    fn publish_never_rewrites_a_claim_from_a_newer_wallsync() {
         let root = circle("newer-schema");
         let ana = identity("Ana");
         let mut future = claim(ANA_DEVICE, &ana.person, "Ana", "2026-08-07T09:02:11Z", None);
@@ -699,7 +699,7 @@ mod tests {
             claim_file_device("P56IOI7-XZWICQ2.sync-conflict-20260807-143122-K5J2FVL.toml"),
             Some("P56IOI7-XZWICQ2")
         );
-        assert_eq!(claim_file_device("P56IOI7-XZWICQ2.toml.kith-tmp"), None);
+        assert_eq!(claim_file_device("P56IOI7-XZWICQ2.toml.wallsync-tmp"), None);
         assert_eq!(claim_file_device(".hidden.toml"), None);
         assert_eq!(claim_file_device("README.md"), None);
     }
@@ -707,7 +707,7 @@ mod tests {
     #[test]
     fn a_circle_with_no_claims_yet_reads_as_empty_rather_than_failing() {
         let root = std::env::temp_dir()
-            .join("kith-claims-tests")
+            .join("wallsync-claims-tests")
             .join(format!("absent-{}", ulid::Ulid::generate()));
         assert!(read_all(&root).unwrap().is_empty());
     }

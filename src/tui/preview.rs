@@ -84,7 +84,7 @@ pub struct SidecarFacts {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub format: Option<String>,
-    /// Found on disk rather than added through kith; reads *found by Ana*.
+    /// Found on disk rather than added through wallsync; reads *found by Ana*.
     pub adopted: bool,
     /// The adding Device's clock ran more than a day ahead, so the Gallery
     /// sorted this Item by arrival and Preview marks the claimed date.
@@ -473,7 +473,7 @@ impl Preview {
     }
 
     /// Attribution · when · resolution · byte size · format, in that fixed order;
-    /// a field kith does not have is omitted rather than guessed.
+    /// a field wallsync does not have is omitted rather than guessed.
     fn fact_line(&self, now: Timestamp) -> String {
         let mut parts = vec![
             self.attribution(),
@@ -529,13 +529,13 @@ impl Preview {
             );
         }
         if self.facts.clock_skewed {
-            return "that Device's clock is ahead of yours; kith sorted this by arrival".to_string();
+            return "that Device's clock is ahead of yours; wallsync sorted this by arrival".to_string();
         }
         if self.facts.adopted {
-            return "found on disk when this Circle was adopted — nobody added it through kith"
+            return "found on disk when this Circle was adopted — nobody added it through wallsync"
                 .to_string();
         }
-        "Attribution is what the adding Device claimed; kith cannot prove it.".to_string()
+        "Attribution is what the adding Device claimed; wallsync cannot prove it.".to_string()
     }
 }
 
@@ -676,7 +676,7 @@ mod tests {
             title: "sunset-4k".into(),
             added_by: person_id(ANA),
             added_at: "2026-08-07T09:14:00Z".into(),
-            path: Some(std::path::PathBuf::from("/tmp/kith-test/sunset-4k.png")),
+            path: Some(std::path::PathBuf::from("/tmp/wallsync-test/sunset-4k.png")),
             hash: Some("b3:0123456789ab0123456789ab0123456789ab0123456789ab0123456789ab0123".into()),
             bytes: Some(1_900_000),
         }
@@ -777,7 +777,7 @@ mod tests {
     fn the_standing_caveat_is_the_default_qualifier() {
         assert_eq!(
             preview().qualifier(now()),
-            "Attribution is what the adding Device claimed; kith cannot prove it."
+            "Attribution is what the adding Device claimed; wallsync cannot prove it."
         );
     }
 

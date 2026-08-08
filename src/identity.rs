@@ -12,7 +12,7 @@ use crate::domain::PersonId;
 
 const SCHEMA: u32 = 1;
 
-/// One of exactly two files kith cannot rebuild from the synced tree.
+/// One of exactly two files wallsync cannot rebuild from the synced tree.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Identity {
     pub schema: u32,
@@ -25,7 +25,7 @@ pub struct Identity {
 pub enum IdentityError {
     #[error("no data directory for this Person")]
     NoDataDir,
-    #[error("an Identity already exists at {0} — kith has no rename in v0.1")]
+    #[error("an Identity already exists at {0} — wallsync has no rename in v0.1")]
     AlreadyExists(PathBuf),
     #[error("a display name is required")]
     NameRequired,
@@ -35,11 +35,11 @@ pub enum IdentityError {
     Malformed(String),
 }
 
-/// `$XDG_DATA_HOME/kith/identity.toml` — data, not state: losing it loses the
+/// `$XDG_DATA_HOME/wallsync/identity.toml` — data, not state: losing it loses the
 /// Person.
 pub fn path() -> Result<PathBuf, IdentityError> {
     directories::BaseDirs::new()
-        .map(|b| b.data_dir().join("kith/identity.toml"))
+        .map(|b| b.data_dir().join("wallsync/identity.toml"))
         .ok_or(IdentityError::NoDataDir)
 }
 
@@ -87,7 +87,7 @@ pub fn create(display_name: &str, now: &str) -> Result<Identity, IdentityError> 
 /// Write 0600 — a shared machine should not hand this Person to the next
 /// account over.
 fn write_private(path: &PathBuf, text: &str) -> Result<(), IdentityError> {
-    let tmp = path.with_extension("toml.kith-tmp");
+    let tmp = path.with_extension("toml.wallsync-tmp");
     std::fs::write(&tmp, text)?;
     #[cfg(unix)]
     {

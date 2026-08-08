@@ -5,7 +5,7 @@
 //! "online" — and a Role is an agreement rather than an enforcement. Both
 //! caveats are permanent footers.
 //!
-//! The pending-join prompt is the one real gate kith has: it is raised when a
+//! The pending-join prompt is the one real gate wallsync has: it is raised when a
 //! Device knocks, shows the fingerprint grouped 4-4 for the out-of-band check,
 //! states the consequence of admitting inline, and never auto-dismisses.
 
@@ -36,11 +36,11 @@ pub const ADMIN_BADGE: &str = "invites and approves";
 
 /// The consequence, stated inside the prompt where the key is pressed.
 const ADMIT_CONSEQUENCE: &str = "Admitting adds this Device to {circle}. It receives every Item, \
-and can add, change or delete Items — kith cannot prevent that, only restore. Approve People, \
+and can add, change or delete Items — wallsync cannot prevent that, only restore. Approve People, \
 not Devices.";
 
-const IDENTIFY_BY_HAND: &str = "kith cannot tell you who this is. It sees a Device, not a Person. \
-Ask your friend to read you the fingerprint their kith printed, and approve only if it matches.";
+const IDENTIFY_BY_HAND: &str = "wallsync cannot tell you who this is. It sees a Device, not a Person. \
+Ask your friend to read you the fingerprint their wallsync printed, and approve only if it matches.";
 
 const UNINVITED_WARNING: &str = "If this is not the Device your friend read to you, you are \
 admitting a stranger to every Item in this Circle — and nothing takes bytes back once they have \
@@ -106,7 +106,7 @@ pub struct UnclaimedDevice {
     pub in_sync: Option<u8>,
 }
 
-/// A Device knocking at this Device, and what kith knows about why.
+/// A Device knocking at this Device, and what wallsync knows about why.
 #[derive(Clone, Debug)]
 pub struct PendingJoin {
     /// Named in the prompt's title; admitting to the wrong Circle is irreversible.
@@ -166,7 +166,7 @@ pub struct Members {
     unclaimed: Vec<UnclaimedDevice>,
     pending: Vec<PendingJoin>,
     /// A banner for a Circle whose Stewardship is vacant, disputed or unknown,
-    /// or for a Sync Engine kith cannot reach.
+    /// or for a Sync Engine wallsync cannot reach.
     notice: Option<String>,
     /// `founder_person` with no claim naming them yet, rendered as the id's short
     /// form and never as the `founder_device` Identity.
@@ -337,7 +337,7 @@ impl Members {
             None => String::new(),
         };
         title.push_str(&plural(members, "Member", "Members"));
-        // `0 connected` would be a claim kith is in no position to make.
+        // `0 connected` would be a claim wallsync is in no position to make.
         if blind {
             title.push_str(" · presence unknown");
         } else {
@@ -429,7 +429,7 @@ impl Members {
 
         if self.people.is_empty() && self.unclaimed.is_empty() {
             lines.push(Line::from(
-                "No Membership claims have arrived yet. kith names nobody it has not been told about.",
+                "No Membership claims have arrived yet. wallsync names nobody it has not been told about.",
             ));
             return (lines, selected_line);
         }
@@ -584,7 +584,7 @@ impl Members {
         let rows = self.row_count();
         let page = self.view_height.max(1);
 
-        // The `gg` chord is the only chord kith has; any other key ends it.
+        // The `gg` chord is the only chord wallsync has; any other key ends it.
         let was_awaiting_g = self.awaiting_g;
         self.awaiting_g = false;
 
@@ -708,7 +708,7 @@ fn member_row(member: &MemberView, cols: &Cols, width: usize) -> String {
     } else if !member.in_circle {
         ("—".to_string(), "—".to_string(), "not in this Circle".to_string())
     } else if member.is_you {
-        // kith holds no connection to itself; `—` is the honest column.
+        // wallsync holds no connection to itself; `—` is the honest column.
         ("—".to_string(), "—".to_string(), asserted_note(member, cols, width))
     } else {
         (
@@ -796,7 +796,7 @@ fn style_row(text: String, selected: bool, pending: bool) -> Line<'static> {
     Line::from(text).style(style)
 }
 
-/// Everything the Steward is given to decide with, and nothing kith cannot see.
+/// Everything the Steward is given to decide with, and nothing wallsync cannot see.
 fn prompt_body(join: &PendingJoin, typed: Option<&str>, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let fp = join.fingerprint();
@@ -909,7 +909,7 @@ pub fn fingerprint(device: &str) -> String {
 }
 
 /// Uppercase, alphanumerics only — hyphens and case are never the difference
-/// between what kith printed and what a Person types back.
+/// between what wallsync printed and what a Person types back.
 fn squash(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
@@ -1265,7 +1265,7 @@ mod tests {
         let rendered = draw(&mut screen, 80, 30);
         assert!(rendered.contains("UJZD-EGXD"), "{rendered}");
         assert!(rendered.contains("it can say anything"), "{rendered}");
-        assert!(rendered.contains("kith cannot prevent that"), "{rendered}");
+        assert!(rendered.contains("wallsync cannot prevent that"), "{rendered}");
         assert!(rendered.contains("a approve"), "{rendered}");
         assert!(rendered.contains("x reject"), "{rendered}");
         assert!(rendered.contains("esc decide later"), "{rendered}");
@@ -1421,7 +1421,7 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_kith_cannot_read_is_shown_as_written() {
+    fn a_timestamp_wallsync_cannot_read_is_shown_as_written() {
         assert_eq!(ago("yesterday-ish"), "yesterday-ish");
         assert_eq!(short_date("some time last Tuesday"), "some time ");
     }
@@ -1442,8 +1442,8 @@ mod tests {
     fn the_notice_banner_is_rendered_above_the_list() {
         let mut screen = Members::new(vec![], vec![])
             .with_circle("walls")
-            .with_notice("Sync Engine unreachable — kith cannot see anyone right now.");
+            .with_notice("Sync Engine unreachable — wallsync cannot see anyone right now.");
         let rendered = draw(&mut screen, 80, 20);
-        assert!(rendered.contains("kith cannot see anyone right now"), "{rendered}");
+        assert!(rendered.contains("wallsync cannot see anyone right now"), "{rendered}");
     }
 }

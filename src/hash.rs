@@ -1,4 +1,4 @@
-//! Content hashing — the one place kith turns bytes into a digest.
+//! Content hashing — the one place wallsync turns bytes into a digest.
 //!
 //! The digest binds an Item to its bytes; it is never the Item's identity, and
 //! it is not a security boundary.
@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-/// The rendering prefix, so a digest written by a future kith that changes
+/// The rendering prefix, so a digest written by a future wallsync that changes
 /// algorithms is recognisably *not* ours rather than silently mis-compared.
 const PREFIX: &str = "b3:";
 
@@ -56,7 +56,7 @@ pub fn short(hash: &str) -> &str {
     &digest[..end]
 }
 
-/// Whether a string is a hash kith itself could have written.
+/// Whether a string is a hash wallsync itself could have written.
 ///
 /// A digest that passes here cannot contain a path separator or a `..`, so the
 /// thumbnail cache cannot be walked out of by a malformed record.
@@ -102,7 +102,7 @@ mod tests {
     const THREE_BYTES: &str = "b3:e1be4d7a8ab5560aa4199eea339849ba8e293d55ca0a81006726d184519e647f";
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("kith-hash-tests");
+        let dir = std::env::temp_dir().join("wallsync-hash-tests");
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }

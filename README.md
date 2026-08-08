@@ -1,4 +1,4 @@
-# kith
+# wallsync
 
 **Local-first, peer-to-peer collections shared with the people you trust.**
 
@@ -10,11 +10,11 @@ touches your screen until *you* press Apply.
 
 ## How it works
 
-kith is a single Rust binary — a CLI and a keyboard-first TUI with image previews on a
+wallsync is a single Rust binary — a CLI and a keyboard-first TUI with image previews on a
 degradation ladder (kitty → iTerm2 → sixel → halfblocks), so it works in any terminal.
-The transport underneath is **Syncthing**: kith speaks to a Syncthing daemon you
+The transport underneath is **Syncthing**: wallsync speaks to a Syncthing daemon you
 already run, over its REST API, and never launches, embeds, or configures one. A
-Circle maps to a synced folder; kith supplies everything Syncthing deliberately
+Circle maps to a synced folder; wallsync supplies everything Syncthing deliberately
 doesn't — People instead of device IDs, Collections instead of directories, metadata
 that travels with each Item, invites and joins, and consent before anything changes
 your desktop. Discovery, NAT traversal, and encryption are Syncthing's job. Honesty
@@ -30,30 +30,30 @@ Gallery attributed to Ana — then Ben adds one and it lands in hers. Verified a
 network with local discovery, global discovery, relays and NAT traversal all disabled.
 
 ```
-kith doctor          # is this Device set up?
-kith init <name>     # mint your Identity
-kith create walls    # a Circle, and its Collection
-kith add ~/Pictures/Wallpapers/*
-kith invite          # a code to send over a channel you already trust
-kith                 # the TUI: Gallery, Preview, Members
+wallsync doctor          # is this Device set up?
+wallsync init <name>     # mint your Identity
+wallsync create walls    # a Circle, and its Collection
+wallsync add ~/Pictures/Wallpapers/*
+wallsync invite          # a code to send over a channel you already trust
+wallsync                 # the TUI: Gallery, Preview, Members
 ```
 
-Already syncing a wallpaper folder? `kith create <name> --path <dir> --adopt` takes it
+Already syncing a wallpaper folder? `wallsync create <name> --path <dir> --adopt` takes it
 over in place — no copying, no second directory.
 
 Apply backends: caelestia, swww, hyprpaper, feh, or your own command in
-`~/.config/kith/config.toml`. Build with `cargo build --release`; you need a Syncthing
-daemon already running, and `kith doctor` names anything missing.
+`~/.config/wallsync/config.toml`. Build with `cargo build --release`; you need a Syncthing
+daemon already running, and `wallsync doctor` names anything missing.
 
 Not yet done: a second Device per Person, Activity, Notifications, a Health screen,
 rotation, Search.
 
 ## Previously: wp-sync
 
-This repo began as **wp-sync**, a one-script bash wallpaper syncer. kith is its
+This repo began as **wp-sync**, a one-script bash wallpaper syncer. wallsync is its
 successor, not a port. The script stays at
 [`wp-sync-setup.sh`](wp-sync-setup.sh) and keeps working; existing installs are not
-stranded — `kith create --adopt` takes over the wallpaper directory you already sync
+stranded — `wallsync create --adopt` takes over the wallpaper directory you already sync
 rather than recreating it.
 
 ## License

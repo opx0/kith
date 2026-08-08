@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA: u32 = 1;
 
 /// Every byte of a Circle's shared state lives under this one hidden directory.
-const KITH_DIR: &str = ".kith";
+const WALLSYNC_DIR: &str = ".wallsync";
 const CIRCLE_FILE: &str = "circle.toml";
 const COLLECTIONS_DIR: &str = "collections";
 
@@ -27,14 +27,14 @@ const COLLECTIONS_DIR: &str = "collections";
 ///
 /// This constant and the line `seed_stignore` writes are one decision, so they
 /// are spelled once, here.
-const TMP_SUFFIX: &str = ".kith-tmp";
+const TMP_SUFFIX: &str = ".wallsync-tmp";
 
 /// The name of the engine's per-Circle ignore file.
 const IGNORE_FILE: &str = ".stignore";
 
 /// The engine's prefix for "you may delete this to unblock a directory removal".
 ///
-/// kith applies it to its own two paths and to nothing else, which is why nothing
+/// wallsync applies it to its own two paths and to nothing else, which is why nothing
 /// authoritative is ever stored under either.
 const DELETE_OK: &str = "(?d)";
 
@@ -42,13 +42,13 @@ const DELETE_OK: &str = "(?d)";
 ///
 /// Every surface naming the Steward reads `founder_device` from here rather than
 /// from the transport, because it is the one fact that reads the same from every
-/// Device. A Device that has never run kith has published no Membership claim, so
+/// Device. A Device that has never run wallsync has published no Membership claim, so
 /// a Circle can know its Steward's Device and still be unable to name the Person.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CircleDescriptor {
     pub schema: u32,
     /// The Circle's immutable id, spelled `circle` on disk because the file is
-    /// read by other kith builds and by People with an editor.
+    /// read by other wallsync builds and by People with an editor.
     #[serde(rename = "circle")]
     pub id: String,
     /// The Circle's name — mutable in a later milestone, write-once in v0.1.
@@ -63,7 +63,7 @@ pub struct CircleDescriptor {
 /// Which Provider a Collection's Items belong to.
 ///
 /// The id is opaque in the format, so additional Collections need no format
-/// change; a later kith's extra fields are read here without complaint.
+/// change; a later wallsync's extra fields are read here without complaint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionDescriptor {
     pub schema: u32,
@@ -76,20 +76,20 @@ pub struct CollectionDescriptor {
     pub provider: String,
 }
 
-/// `<root>/.kith` — a Circle's shared state.
-pub fn kith_dir(root: &Path) -> PathBuf {
-    root.join(KITH_DIR)
+/// `<root>/.wallsync` — a Circle's shared state.
+pub fn wallsync_dir(root: &Path) -> PathBuf {
+    root.join(WALLSYNC_DIR)
 }
 
-/// `<root>/.kith/circle.toml`.
+/// `<root>/.wallsync/circle.toml`.
 pub fn circle_path(root: &Path) -> PathBuf {
-    kith_dir(root).join(CIRCLE_FILE)
+    wallsync_dir(root).join(CIRCLE_FILE)
 }
 
-/// `<root>/.kith/collections` — a directory, because Circle→Collection is
+/// `<root>/.wallsync/collections` — a directory, because Circle→Collection is
 /// one-to-many.
 pub fn collections_dir(root: &Path) -> PathBuf {
-    kith_dir(root).join(COLLECTIONS_DIR)
+    wallsync_dir(root).join(COLLECTIONS_DIR)
 }
 
 /// Serialise `value` as TOML and put it at `path` without ever letting a partial
@@ -114,7 +114,7 @@ pub fn read_circle(root: &Path) -> io::Result<Option<CircleDescriptor>> {
 
 /// Write this Circle's descriptor.
 ///
-/// Write-once is a milestone rule enforced by `kith create`, not here; what is
+/// Write-once is a milestone rule enforced by `wallsync create`, not here; what is
 /// enforced here is that the bytes land whole.
 pub fn write_circle(root: &Path, d: &CircleDescriptor) -> io::Result<()> {
     write_atomic(&circle_path(root), d)
@@ -160,7 +160,7 @@ pub fn read_collections(root: &Path) -> io::Result<Vec<CollectionDescriptor>> {
     Ok(out)
 }
 
-/// Seed this Circle's ignore file so kith's own scratch and its half-written
+/// Seed this Circle's ignore file so wallsync's own scratch and its half-written
 /// descriptors never leave this Device.
 ///
 /// `reserved` is written verbatim, in the order given, and existing lines are
@@ -178,7 +178,7 @@ pub fn seed_stignore(root: &Path, reserved: &[&str]) -> io::Result<()> {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
 
     let mut wanted = vec![
-        format!("{DELETE_OK}{KITH_DIR}/local"),
+        format!("{DELETE_OK}{WALLSYNC_DIR}/local"),
         format!("{DELETE_OK}*{TMP_SUFFIX}"),
     ];
     wanted.extend(reserved.iter().map(|g| (*g).to_string()));
@@ -206,7 +206,7 @@ fn read_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>>
         Err(e) => return Err(e),
     };
     // Unknown keys are ignored rather than refused, so a descriptor written by a
-    // newer kith stays readable. Nothing is dropped: v0.1 never rewrites one it
+    // newer wallsync stays readable. Nothing is dropped: v0.1 never rewrites one it
     // did not just create.
     toml::from_str(&text)
         .map(Some)
@@ -241,9 +241,9 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// `<target>.kith-tmp`, beside the target so the rename stays within one filesystem.
+/// `<target>.wallsync-tmp`, beside the target so the rename stays within one filesystem.
 ///
-/// Exclusive creation with a pid-qualified fallback, because two kith processes
+/// Exclusive creation with a pid-qualified fallback, because two wallsync processes
 /// sharing one temp file would interleave into a torn document the rename then
 /// publishes. Both names end in the suffix the engine ignores.
 fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
@@ -299,7 +299,7 @@ mod tests {
     fn scratch(label: &str) -> PathBuf {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "kith-descriptors-{}-{n}-{label}",
+            "wallsync-descriptors-{}-{n}-{label}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -310,7 +310,7 @@ mod tests {
     fn a_circle() -> CircleDescriptor {
         CircleDescriptor {
             schema: SCHEMA,
-            id: "kith-4tj2q9xa".into(),
+            id: "wallsync-4tj2q9xa".into(),
             name: "walls".into(),
             created: "2026-08-07T09:02:11.004Z".into(),
             founder_person: "p-01k1yfq2m7vj3w8t0pz4rxab6c".into(),
@@ -343,7 +343,7 @@ mod tests {
         write_circle(&root, &a_circle()).unwrap();
 
         let text = fs::read_to_string(circle_path(&root)).unwrap();
-        assert!(text.contains("circle = \"kith-4tj2q9xa\""), "{text}");
+        assert!(text.contains("circle = \"wallsync-4tj2q9xa\""), "{text}");
         assert!(!text.contains("id ="), "the id is spelled `circle` on disk: {text}");
         assert!(text.contains("founder_device = "), "{text}");
         fs::remove_dir_all(&root).unwrap();
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn a_malformed_descriptor_is_an_error() {
         let root = scratch("malformed");
-        fs::create_dir_all(kith_dir(&root)).unwrap();
+        fs::create_dir_all(wallsync_dir(&root)).unwrap();
         fs::write(circle_path(&root), "this is not = = toml").unwrap();
 
         let err = read_circle(&root).unwrap_err();
@@ -373,8 +373,8 @@ mod tests {
     #[test]
     fn a_descriptor_missing_a_required_fact_is_an_error_not_a_default() {
         let root = scratch("incomplete");
-        fs::create_dir_all(kith_dir(&root)).unwrap();
-        fs::write(circle_path(&root), "schema = 1\ncircle = \"kith-4tj2q9xa\"\n").unwrap();
+        fs::create_dir_all(wallsync_dir(&root)).unwrap();
+        fs::write(circle_path(&root), "schema = 1\ncircle = \"wallsync-4tj2q9xa\"\n").unwrap();
 
         assert_eq!(
             read_circle(&root).unwrap_err().kind(),
@@ -404,7 +404,7 @@ mod tests {
         let root = scratch("no-litter");
         write_circle(&root, &a_circle()).unwrap();
 
-        let names: Vec<String> = fs::read_dir(kith_dir(&root))
+        let names: Vec<String> = fs::read_dir(wallsync_dir(&root))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -416,7 +416,7 @@ mod tests {
     fn a_failed_write_leaves_no_temp_file_either() {
         // A directory where the descriptor should be: the rename cannot land.
         let root = scratch("failed-write");
-        let target = kith_dir(&root).join("circle.toml");
+        let target = wallsync_dir(&root).join("circle.toml");
         fs::create_dir_all(&target).unwrap();
 
         assert!(write_circle(&root, &a_circle()).is_err());
@@ -430,7 +430,7 @@ mod tests {
         let root = scratch("temp-name");
         let tmp = temp_path(&circle_path(&root), None);
         let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(name, "circle.toml.kith-tmp");
+        assert_eq!(name, "circle.toml.wallsync-tmp");
 
         seed_stignore(&root, &[]).unwrap();
         let ignores = fs::read_to_string(root.join(IGNORE_FILE)).unwrap();
@@ -450,7 +450,7 @@ mod tests {
         write_circle(&root, &renamed).unwrap();
 
         assert_eq!(read_circle(&root).unwrap().unwrap(), renamed);
-        let names: Vec<String> = fs::read_dir(kith_dir(&root))
+        let names: Vec<String> = fs::read_dir(wallsync_dir(&root))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_carries_kiths_own_lines_and_the_globs_it_was_given() {
+    fn the_seed_carries_wallsyncs_own_lines_and_the_globs_it_was_given() {
         // The fixture uses names no engine has ever used, so this module cannot
         // be quietly rewritten to recognise one.
         let root = scratch("seed");
@@ -515,8 +515,8 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "(?d).kith/local",
-                "(?d)*.kith-tmp",
+                "(?d).wallsync/local",
+                "(?d)*.wallsync-tmp",
                 ".engine-bookkeeping",
                 "archive/**",
             ]
@@ -536,7 +536,7 @@ mod tests {
 
         assert_eq!(once, twice, "seeding is idempotent");
         assert!(once.starts_with("*.tmp\n// hand-written\n"), "{once}");
-        assert_eq!(once.matches("(?d).kith/local").count(), 1, "{once}");
+        assert_eq!(once.matches("(?d).wallsync/local").count(), 1, "{once}");
         assert!(once.ends_with('\n'));
         fs::remove_dir_all(&root).unwrap();
     }

@@ -188,7 +188,7 @@ impl Class {
     }
 }
 
-/// kith refuses to decode beyond these; the tile carries the reason instead of
+/// wallsync refuses to decode beyond these; the tile carries the reason instead of
 /// hanging. Apply is still offered — the backend decides what it can set.
 const MAX_MEGAPIXELS: u64 = 128;
 const MAX_BYTES_ON_DISK: u64 = 512 * 1024 * 1024;
@@ -256,10 +256,10 @@ pub struct Thumbs {
 }
 
 impl Thumbs {
-    /// The cache under `$XDG_CACHE_HOME/kith/thumbs`, outside every Circle root:
+    /// The cache under `$XDG_CACHE_HOME/wallsync/thumbs`, outside every Circle root:
     /// a thumbnail inside the synced tree is bytes every Member pays to receive.
     pub fn new(provider: Arc<dyn Provider>) -> Self {
-        let dir = directories::BaseDirs::new().map(|b| b.cache_dir().join("kith/thumbs"));
+        let dir = directories::BaseDirs::new().map(|b| b.cache_dir().join("wallsync/thumbs"));
         Self::with_dir(dir, provider)
     }
 
@@ -271,7 +271,7 @@ impl Thumbs {
                 Err(e) => (
                     None,
                     Some(format!(
-                        "the preview cache at {} is unwritable ({e}) — kith is decoding into memory instead",
+                        "the preview cache at {} is unwritable ({e}) — wallsync is decoding into memory instead",
                         d.display()
                     )),
                 ),
@@ -537,7 +537,7 @@ impl Job {
     }
 }
 
-/// Write to `.tmp`, `fsync`, `rename(2)`, so two kith processes never see half a
+/// Write to `.tmp`, `fsync`, `rename(2)`, so two wallsync processes never see half a
 /// PNG. Failure is silent: the cache is an optimisation, never a precondition.
 fn write_png_atomically(final_path: &Path, img: &DynamicImage) {
     let mut buf = std::io::Cursor::new(Vec::new());
@@ -593,9 +593,9 @@ fn sweep_in_background(dir: PathBuf) {
 
 // ── tiles ────────────────────────────────────────────────────────────
 
-/// What kith knows about one tile — and, as importantly, what it does not.
+/// What wallsync knows about one tile — and, as importantly, what it does not.
 ///
-/// Collapsing the three states would make kith lie in one of two directions:
+/// Collapsing the three states would make wallsync lie in one of two directions:
 /// pretending an Item is here when its bytes are not, or hiding bytes that are
 /// here because no record names them yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1004,7 +1004,7 @@ impl Gallery {
                 area,
                 &[
                     format!(
-                        "This terminal is {}×{}. kith needs {MIN_TERM_W}×{MIN_TERM_H} to draw the Gallery.",
+                        "This terminal is {}×{}. wallsync needs {MIN_TERM_W}×{MIN_TERM_H} to draw the Gallery.",
                         term.width, term.height
                     ),
                     "Nothing is lost — resize and the grid returns with the same Item selected."
@@ -1099,7 +1099,7 @@ impl Gallery {
                 frame.render_widget(field(g.tile_w, g.img_h, '▒', Some('↓')), img_rect);
             }
             // Bytes with no record: nothing has said this is an Item of this
-            // Collection, so kith names it and waits rather than guessing.
+            // Collection, so wallsync names it and waits rather than guessing.
             Knowledge::BytesOnly => {
                 frame.render_widget(field(g.tile_w, g.img_h, '░', Some('⋯')), img_rect);
             }
@@ -1126,7 +1126,7 @@ impl Gallery {
                         frame.render_widget(field(g.tile_w, g.img_h, '░', None), img_rect)
                     }
                     // Bytes present, not decodable. The tile carries `!` and
-                    // Preview explains; kith never leaves a hole.
+                    // Preview explains; wallsync never leaves a hole.
                     Slot::Failed(why) => {
                         frame.render_widget(field(g.tile_w, g.img_h, '▒', Some('!')), img_rect);
                         self.last_failure = Some(why);
@@ -1135,7 +1135,7 @@ impl Gallery {
             }
         }
 
-        // Always drawn: an Item kith cannot picture is still one kith can name.
+        // Always drawn: an Item wallsync cannot picture is still one wallsync can name.
         let caption = self.caption(idx, g.tile_w);
         let style = if selected { Style::new().reversed() } else { Style::new() };
         frame.render_widget(Paragraph::new(Line::from(caption)).style(style), cap_rect);
@@ -1172,7 +1172,7 @@ impl Gallery {
     fn empty_state(&self) -> Vec<String> {
         match self.emptiness {
             Emptiness::NoCircles => vec![
-                "No Circles yet. Run kith create <name>, or kith join <code> if someone invited you."
+                "No Circles yet. Run wallsync create <name>, or wallsync join <code> if someone invited you."
                     .into(),
             ],
             Emptiness::JustJoined => vec![
@@ -1189,7 +1189,7 @@ impl Gallery {
                     .into(),
             ],
             Emptiness::NoItems => vec![format!(
-                "Nothing here yet. kith add <paths…>, or wait — {} Items appear as they arrive.",
+                "Nothing here yet. wallsync add <paths…>, or wait — {} Items appear as they arrive.",
                 match self.other_members.first() {
                     Some(name) if self.other_members.len() == 1 => format!("{name}'s"),
                     _ => "the other Members'".into(),
@@ -1265,7 +1265,7 @@ impl Gallery {
         }
 
         // Newest first. Ties break on the key descending — Item ids are ULIDs and
-        // so time-ordered, which keeps the Gallery and `kith list items` from ever
+        // so time-ordered, which keeps the Gallery and `wallsync list items` from ever
         // disagreeing.
         tiles.sort_by(|a, b| b.sort_at.cmp(&a.sort_at).then_with(|| b.key.cmp(&a.key)));
         self.tiles = tiles;
@@ -1484,7 +1484,7 @@ mod tests {
     /// Every test Gallery caches under /tmp. A test must never write into the
     /// Person's real cache directory.
     fn scratch() -> PathBuf {
-        std::env::temp_dir().join(format!("kith-gallery-tests-{}", std::process::id()))
+        std::env::temp_dir().join(format!("wallsync-gallery-tests-{}", std::process::id()))
     }
 
     fn gallery(items: Vec<Item>) -> Gallery {
@@ -1936,7 +1936,7 @@ mod tests {
 
     #[test]
     fn the_cache_is_keyed_on_content_and_mentions_no_geometry() {
-        let dir = Path::new("/tmp/kith-test-thumbs");
+        let dir = Path::new("/tmp/wallsync-test-thumbs");
         let hash = format!("b3:{}", "9".repeat(64));
         let thumb = cache_file(dir, &hash, Class::Thumb);
         let full = cache_file(dir, &hash, Class::Full);
@@ -1971,13 +1971,13 @@ mod tests {
     fn an_unwritable_cache_is_a_warning_and_never_a_failure() {
         // A path under a regular file cannot be a directory.
         let mut blocked = std::env::temp_dir();
-        blocked.push(format!("kith-blocked-{}", std::process::id()));
+        blocked.push(format!("wallsync-blocked-{}", std::process::id()));
         std::fs::write(&blocked, b"not a directory").expect("write the blocker");
         let thumbs = Thumbs::with_dir(
             Some(blocked.join("thumbs")),
             Arc::new(WallpaperProvider::default()),
         );
-        assert!(thumbs.warning().is_some(), "one warn note, and kith keeps drawing");
+        assert!(thumbs.warning().is_some(), "one warn note, and wallsync keeps drawing");
         drop(thumbs);
         let _ = std::fs::remove_file(&blocked);
     }
@@ -1987,7 +1987,7 @@ mod tests {
     #[test]
     fn an_empty_grid_always_says_why() {
         let mut g = gallery(Vec::new());
-        assert!(g.empty_state()[0].contains("kith add"));
+        assert!(g.empty_state()[0].contains("wallsync add"));
 
         g.set_other_members(vec!["Ben".into()]);
         assert!(g.empty_state()[0].contains("Ben's"), "one Member is named");
@@ -1999,7 +1999,7 @@ mod tests {
         assert!(g.empty_state()[0].contains("has to be connected too"));
 
         g.set_emptiness(Emptiness::NoCircles);
-        assert!(g.empty_state()[0].contains("kith create"));
+        assert!(g.empty_state()[0].contains("wallsync create"));
     }
 
     #[test]

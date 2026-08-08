@@ -50,7 +50,7 @@ fn on_path(binary: &str) -> bool {
 }
 
 /// Caelestia owns the wallpaper on a shell that already manages it: setting one
-/// also regenerates the system colour scheme, so kith asks it rather than
+/// also regenerates the system colour scheme, so wallsync asks it rather than
 /// painting over it.
 struct Caelestia;
 impl ApplyBackend for Caelestia {
@@ -179,7 +179,7 @@ impl WallpaperProvider {
             .map(|b| b.as_ref())
     }
 
-    /// Which backends are present, for `kith doctor`.
+    /// Which backends are present, for `wallsync doctor`.
     pub fn detected(&self) -> Vec<&'static str> {
         let env = SessionEnv::detect();
         self.backends
