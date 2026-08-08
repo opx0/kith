@@ -2009,7 +2009,7 @@ mod tests {
         assert!(g.empty_state()[0].contains("private to you"));
     }
 
-    // ── wording (CONTEXT.md) ─────────────────────────────────────────
+    // ── wording ──────────────────────────────────────────────────────
 
     #[test]
     fn no_surface_string_uses_a_word_the_glossary_forbids() {
