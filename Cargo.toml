@@ -2,6 +2,21 @@
 name = "kith"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Local-first, peer-to-peer collections shared with the people you trust. Share wallpapers with your circle — no cloud, no account, no server."
+authors = ["opx0"]
+license = "MIT"
+repository = "https://github.com/opx0/kith"
+homepage = "https://github.com/opx0/kith"
+readme = "README.md"
+keywords = ["syncthing", "wallpaper", "tui", "p2p", "local-first"]
+categories = ["command-line-utilities"]
+exclude = ["wp-sync-setup.sh"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 [dependencies]
 blake3 = "1.8.6"
