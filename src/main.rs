@@ -180,7 +180,7 @@ async fn doctor() -> i32 {
         None => {
             let backends = WallpaperProvider::default().detected();
             if backends.is_empty() {
-                println!("warn  no wallpaper backend detected (looked for swww, hyprpaper, feh)");
+                println!("warn  no wallpaper backend detected (looked for caelestia, swww, hyprpaper, feh)");
                 println!("      Apply will be shown as unavailable until one is installed,");
                 println!("      or until you set provider.wallpaper.custom.apply in config.toml");
             } else {

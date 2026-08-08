@@ -17,7 +17,8 @@ pub const UNKNOWN_KEY_NOTE: &str = "config.unknown_key";
 
 /// Accepted values of `provider.wallpaper.backend` — the backends the wallpaper
 /// Provider implements, plus `auto` and the `custom` escape hatch.
-pub const APPLY_BACKENDS: &[&str] = &["auto", "swww", "hyprpaper", "feh", "custom"];
+pub const APPLY_BACKENDS: &[&str] =
+    &["auto", "caelestia", "swww", "hyprpaper", "feh", "custom"];
 
 /// The settings a Person can hold.
 ///

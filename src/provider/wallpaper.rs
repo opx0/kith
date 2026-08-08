@@ -49,6 +49,25 @@ fn on_path(binary: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Caelestia owns the wallpaper on a shell that already manages it: setting one
+/// also regenerates the system colour scheme, so kith asks it rather than
+/// painting over it.
+struct Caelestia;
+impl ApplyBackend for Caelestia {
+    fn id(&self) -> &'static str {
+        "caelestia"
+    }
+    fn detect(&self, env: &SessionEnv) -> bool {
+        env.wayland && on_path("caelestia")
+    }
+    fn targets(&self) -> Result<Vec<ApplyTarget>, ActionError> {
+        Ok(vec![ApplyTarget::AllMonitors])
+    }
+    fn apply(&self, bytes: &Path, _target: &ApplyTarget) -> Result<(), ActionError> {
+        run(Command::new("caelestia").arg("wallpaper").arg("-f").arg(bytes))
+    }
+}
+
 struct Swww;
 impl ApplyBackend for Swww {
     fn id(&self) -> &'static str {
@@ -137,7 +156,12 @@ impl Default for WallpaperProvider {
 impl WallpaperProvider {
     pub fn new(custom_command: Option<String>) -> Self {
         Self {
-            backends: vec![Box::new(Swww), Box::new(Hyprpaper), Box::new(Feh)],
+            backends: vec![
+                Box::new(Caelestia),
+                Box::new(Swww),
+                Box::new(Hyprpaper),
+                Box::new(Feh),
+            ],
             custom_command,
         }
     }
@@ -212,7 +236,7 @@ impl Provider for WallpaperProvider {
             Availability::Available
         } else {
             Availability::Unavailable {
-                reason: "no wallpaper backend detected (looked for swww, hyprpaper, feh)".into(),
+                reason: "no wallpaper backend detected (looked for caelestia, swww, hyprpaper, feh)".into(),
             }
         };
         vec![ActionDecl {
@@ -265,7 +289,7 @@ impl Provider for WallpaperProvider {
         }
 
         let backend = self.active().ok_or_else(|| {
-            ActionError::NoBackend("looked for swww, hyprpaper, feh".into())
+            ActionError::NoBackend("looked for caelestia, swww, hyprpaper, feh".into())
         })?;
         backend.apply(path, &target)?;
         Ok(ActionOutcome {
