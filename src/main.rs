@@ -64,9 +64,18 @@ enum Command {
     /// Add content to a Circle's Collection as Items.
     Add { paths: Vec<String> },
     /// List Items, Circles or Members.
-    List { subject: Option<String> },
+    List {
+        subject: Option<String>,
+        /// Which Circle, when this Device is in more than one.
+        #[arg(long, value_name = "NAME")]
+        circle: Option<String>,
+    },
     /// Report sync state.
-    Status,
+    Status {
+        /// Which Circle, when this Device is in more than one.
+        #[arg(long, value_name = "NAME")]
+        circle: Option<String>,
+    },
     /// Check that this Device is set up correctly.
     Doctor,
 }
@@ -98,8 +107,12 @@ async fn main() {
                 cmd::add::run(&paths).await
             }
         }
-        Some(Command::List { subject }) => cmd::report::list(subject.as_deref(), cli.json).await,
-        Some(Command::Status) => cmd::report::status(cli.json).await,
+        Some(Command::List { subject, circle }) => {
+            cmd::report::list(subject.as_deref(), circle.as_deref(), cli.json).await
+        }
+        Some(Command::Status { circle }) => {
+            cmd::report::status(circle.as_deref(), cli.json).await
+        }
         // Bare `kith` opens the TUI.
         None => tui::run().await,
     };

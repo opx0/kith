@@ -73,7 +73,7 @@ Presence reads unknown rather than not connected.";
 ///
 /// Never needs the Sync Engine: with it down the tree is still real, so every
 /// subject exits 0. Only `status` treats unreachability as its own result.
-pub async fn list(subject: Option<&str>, json: bool) -> i32 {
+pub async fn list(subject: Option<&str>, circle: Option<&str>, json: bool) -> i32 {
     let subject = match Subject::parse(subject) {
         Ok(s) => s,
         Err(f) => return Report::new("list", json).finish::<()>(None, Some(f), String::new),
@@ -95,11 +95,11 @@ pub async fn list(subject: Option<&str>, json: bool) -> i32 {
 
     match subject {
         Subject::Circles => list_circles(report, &sync, &circles, me.as_ref()).await,
-        Subject::Items => match active(&circles) {
+        Subject::Items => match active(&circles, circle) {
             Ok(circle) => list_items(report, &sync, circle),
             Err(f) => report.finish::<()>(None, Some(f), String::new),
         },
-        Subject::Members => match active(&circles) {
+        Subject::Members => match active(&circles, circle) {
             Ok(circle) => list_members(report, &sync, circle, me.as_ref()).await,
             Err(f) => report.finish::<()>(None, Some(f), String::new),
         },
@@ -110,7 +110,7 @@ pub async fn list(subject: Option<&str>, json: bool) -> i32 {
 ///
 /// Exits 69 when the Sync Engine is unreachable and prints the local facts
 /// anyway, so it works as a health probe without becoming useless as a report.
-pub async fn status(json: bool) -> i32 {
+pub async fn status(circle: Option<&str>, json: bool) -> i32 {
     let mut report = Report::new("status", json);
 
     let loaded = match configuration(&mut report) {
@@ -369,11 +369,21 @@ async fn list_members(
     report.finish(Some(data), None, || body)
 }
 
-/// Which Circle a Circle-scoped verb acts on: the sole one, or a refusal.
-///
-/// `--circle` is not in this build's signature, and the CLI never guesses from
-/// history.
-fn active(circles: &[CircleRef]) -> Result<&CircleRef, Failure> {
+/// Which Circle a Circle-scoped verb acts on: the named one, the sole one, or a
+/// refusal. Never guessed from history.
+fn active<'a>(circles: &'a [CircleRef], wanted: Option<&str>) -> Result<&'a CircleRef, Failure> {
+    if let Some(name) = wanted {
+        return circles
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name) || c.id.0.eq_ignore_ascii_case(name))
+            .ok_or_else(|| Failure {
+                code: "circle.unknown",
+                exit: EX_USAGE,
+                message: format!("no Circle here is called {name}"),
+                detail: Some(circles.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ")),
+                fix: None,
+            });
+    }
     match circles {
         [] => Err(Failure {
             code: "circle.none",
@@ -1910,13 +1920,13 @@ mod tests {
         };
 
         let one = vec![circle("kith-a", "walls")];
-        assert_eq!(active(&one).unwrap().name, "walls");
+        assert_eq!(active(&one, None).unwrap().name, "walls");
 
         let none: Vec<CircleRef> = Vec::new();
-        assert_eq!(active(&none).unwrap_err().exit, EX_USAGE);
+        assert_eq!(active(&none, None).unwrap_err().exit, EX_USAGE);
 
         let many = vec![circle("kith-a", "walls"), circle("kith-b", "photos")];
-        let refused = active(&many).unwrap_err();
+        let refused = active(&many, None).unwrap_err();
         assert_eq!(refused.exit, EX_USAGE);
         assert!(refused.message.contains("--circle"), "{}", refused.message);
         assert!(refused.detail.unwrap().contains("photos"));
