@@ -1,24 +1,15 @@
-//! The domain vocabulary, as fixed by `CONTEXT.md`.
-//!
-//! Nothing in this module knows what a wallpaper is (that is a Provider's job,
-//! ADR-0003) or what a Syncthing folder is (that is behind the Sync Engine seam,
-//! ADR-0002). It knows People, Circles, Collections and Items.
+//! The domain vocabulary: People, Circles, Collections and Items.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 /// A Person's stable identity: `p-` followed by a 26-character Crockford ULID.
-///
-/// The prefix is load-bearing — it makes a PersonId self-describing in an error
-/// message and impossible to mistake for a Device Identity, which is what an
-/// unresolvable attribution would otherwise print.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PersonId(String);
 
 impl PersonId {
-    /// Mint a new Identity. Local, random, and never derived from the founding
-    /// Device — a Person outlives the Device they first appeared on.
+    /// Mint a new Identity — local, random, never derived from the Device.
     pub fn generate() -> Self {
         Self(format!("p-{}", ulid::Ulid::generate().to_string().to_lowercase()))
     }
@@ -33,14 +24,10 @@ impl PersonId {
     }
 }
 
-/// Read an id back from something kith itself wrote — a Circle descriptor's
-/// `founder_person`, a Favourites line, a `--json` handle round-tripping.
+/// Read an id back from something kith itself wrote.
 ///
-/// It validates nothing on purpose: the id is whatever the file said, and a
-/// reader that rejected an id a peer's newer kith minted would drop that
-/// Person's attribution rather than show it. Minting is [`PersonId::generate`]
-/// and stays that way — this is the read path, not a second way to become
-/// somebody.
+/// Validates nothing on purpose: rejecting an id a peer's newer kith minted
+/// would drop that Person's attribution rather than show it.
 impl From<String> for PersonId {
     fn from(s: String) -> Self {
         Self(s)
@@ -61,8 +48,8 @@ impl fmt::Debug for PersonId {
 
 /// An Item's stable identity: a bare ULID, minted once at import.
 ///
-/// Deliberately *not* the content hash — an Item survives being moved, renamed
-/// or re-encoded, and only its binding to bytes changes.
+/// Deliberately *not* the content hash — an Item survives a move, a rename or a
+/// re-encode, and only its binding to bytes changes.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ItemId(String);
 
@@ -76,9 +63,8 @@ impl ItemId {
     }
 }
 
-/// Read an Item id back from local state kith wrote — the Favourites log, the
-/// seen set. Same rule as [`PersonId`]'s: the read path validates nothing, and
-/// minting stays [`ItemId::generate`].
+/// Read an Item id back from local state kith wrote; validates nothing, as
+/// [`PersonId`]'s does not.
 impl From<String> for ItemId {
     fn from(s: String) -> Self {
         Self(s)
@@ -91,11 +77,7 @@ impl fmt::Display for ItemId {
     }
 }
 
-/// A Member's declared capability in a Circle.
-///
-/// A Role is a policy, not an enforcement: kith has no server to arbitrate and
-/// the transport replicates bytes to every Member equally. Every surface that
-/// shows a Role must be honest about that.
+/// A Member's declared capability in a Circle — a policy, not an enforcement.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -128,15 +110,15 @@ pub struct MembershipClaim {
 pub struct Person {
     pub id: PersonId,
     pub display_name: String,
-    /// v0.1 always holds exactly one; the shape is plural from day one so the
-    /// second Device lands without a migration.
+    /// v0.1 always holds exactly one; plural from day one so the second Device
+    /// lands without a migration.
     pub devices: Vec<String>,
 }
 
 /// Whether another Member's Device is reachable from *this* Device, right now.
 ///
 /// Never called "online": this is one Device's own live view of one connection,
-/// not a claim about a Person or about the world. `Unknown` is a real answer.
+/// not a claim about a Person. `Unknown` is a real answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Presence {
     Connected,
@@ -153,26 +135,6 @@ impl Presence {
             Presence::Unknown => "unknown",
         }
     }
-}
-
-/// A named group of People who have chosen to share with each other, and the
-/// boundary of both trust and sync.
-#[derive(Clone, Debug)]
-pub struct Circle {
-    pub id: String,
-    pub name: String,
-    /// Where this Circle's bytes live on this Device.
-    pub root: std::path::PathBuf,
-}
-
-/// A named set of Items inside a Circle — a logical space, not a directory.
-///
-/// v0.1 creates exactly one per Circle, named `main`. The one-to-many shape is
-/// modelled from the start so v0.3 opens it up without a migration.
-#[derive(Clone, Debug)]
-pub struct Collection {
-    pub id: String,
-    pub provider: String,
 }
 
 /// One piece of content: the bytes plus everything kith knows about them.

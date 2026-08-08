@@ -1,28 +1,15 @@
-//! The Gallery — a Collection rendered as a grid, and the screen the whole
-//! product exists for (walkthrough steps 9 and 12).
+//! The Gallery — a Collection rendered as a grid.
 //!
-//! Per `docs/spec/gallery-preview-actions.md`. Three things in this module are
-//! load-bearing rather than decorative:
-//!
-//! 1. **The thumbnail cache is keyed on content hash at two canonical sizes**
-//!    (§2.1–2.2). A cache keyed on tile geometry would be thrown away by every
-//!    resize; a 512 px PNG re-scaled to a 144×85 px tile costs microseconds and
-//!    survives every reflow. The cache is rebuildable and authoritative over
-//!    nothing — deleting it costs re-decodes and no information at all.
-//! 2. **Selection is anchored to an Item, never to an index** (§1.5). Content
-//!    arriving from a Member re-sorts the grid; it must not move what is under a
-//!    Person's cursor. That is not a nicety — it is what makes it impossible for
-//!    a Member's incoming Item to be substituted under a Person's Apply
-//!    keystroke mid-gesture (§7.5).
-//! 3. **Selection is drawn outside the image** (§1.4). On the kitty and iTerm2
-//!    rungs the image widget owns its cells and the TUI may not paint over them,
-//!    so the selected tile is marked by a reverse-video caption and a bar in the
-//!    gutter column to its left. Both survive every rung and neither needs colour.
+//! Three things here are load-bearing. The thumbnail cache is keyed on content
+//! hash at two canonical sizes, so a resize never invalidates an entry. Selection
+//! is anchored to an Item rather than an index, so content arriving from a Member
+//! cannot move what is under a Person's cursor. And selection is drawn outside
+//! the image, because on the kitty and iTerm2 rungs the image widget owns its
+//! cells and the TUI may not paint over them.
 //!
 //! This module produces no `Cmd::Perform`-shaped effect of its own: `handle_key`
-//! returns a [`GalleryAction`] and the caller performs it. Every Action therefore
-//! begins at a keystroke, which is §7.2's one-line consent invariant made
-//! structural — Apply is always local and always deliberate.
+//! returns a [`GalleryAction`] and the caller performs it, so every Action begins
+//! at a keystroke.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
@@ -48,18 +35,15 @@ use crate::provider::{PixelBudget, Preview, Provider, wallpaper::WallpaperProvid
 
 /// An Action the Person asked for on the selected Item, or the request to leave.
 ///
-/// The Gallery decides *what was asked for*; it never performs. Delete in
-/// particular is a request — the confirm that names the consequence
-/// ("this deletes it for every Member", §6.5) is the caller's, because only the
-/// caller knows who added the Item and can append the tombstone.
+/// The Gallery decides *what was asked for*; it never performs — only the caller
+/// knows who added an Item and can append the tombstone a Delete needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GalleryAction {
-    /// Open the Item in Preview. Entering Preview is what marks it seen (§3.1).
+    /// Open the Item in Preview, which is what marks it seen.
     Open(ItemId),
-    /// Apply — make this Item active on *this* Device, and nowhere else.
+    /// Make this Item active on *this* Device, and nowhere else.
     Apply(ItemId),
-    /// Toggle the Person's private mark. The `★` has already moved (§6.2's
-    /// "instant"); the caller's job is the append to `favourites.jsonl`.
+    /// Toggle the Person's private mark.
     Favourite(ItemId),
     /// Show the bytes in the Person's desktop.
     Reveal(ItemId),
@@ -71,11 +55,9 @@ pub enum GalleryAction {
 
 // ── the preview ladder ───────────────────────────────────────────────
 
-/// Which rung of the preview ladder this Device landed on (ADR-0001, §8).
+/// Which rung of the preview ladder this Device landed on.
 ///
-/// Halfblocks is the shipped fallback, never a failure: kith is never unusable
-/// because of a terminal, and the words *unsupported*, *error* and *failed* are
-/// banned in this context (cli-tui.md §7.3).
+/// Halfblocks is the shipped fallback, never a failure.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rung {
     Kitty,
@@ -85,7 +67,7 @@ pub enum Rung {
 }
 
 impl Rung {
-    /// The permanent right-hand fact on the status row (§8.2).
+    /// The permanent right-hand fact on the status row.
     pub fn label(self) -> &'static str {
         match self {
             Rung::Kitty => "kitty",
@@ -107,11 +89,9 @@ impl From<ProtocolType> for Rung {
     }
 }
 
-// ── grid geometry (§1.2) ─────────────────────────────────────────────
+// ── grid geometry ────────────────────────────────────────────────────
 
-/// The terminal's real cell size in pixels, queried once and re-queried on
-/// resize. Where the terminal will not report it, 8×16 is assumed and
-/// `kith doctor` says so.
+/// The terminal's real cell size in pixels; 8×16 where it will not report one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellSize {
     pub w_px: u16,
@@ -138,14 +118,12 @@ const MIN_TILE_W: u16 = 14;
 const MAX_TILE_W: u16 = 30;
 const MAX_COLS: u16 = 10;
 
-/// Below this the grid stops drawing and says the measured size (§1.2). The
-/// frame rows stay, so nothing is lost and resizing back restores the selection.
+/// Below this the grid stops drawing and says the measured size.
 const MIN_TERM_W: u16 = 60;
 const MIN_TERM_H: u16 = 18;
 
-/// Target tile width. Wider on halfblocks, where each cell is worth only two
-/// pixels and a small tile stops being recognisable — the terminal's budget is
-/// better spent on fewer, more legible pictures than on more mush (§8.1).
+/// Target tile width. Wider on halfblocks, where a cell is worth two pixels and
+/// a small tile stops being recognisable.
 fn target_tile_w(rung: Rung) -> u16 {
     if rung == Rung::Halfblocks { 26 } else { 20 }
 }
@@ -170,8 +148,7 @@ fn geometry(area: Rect, cell: CellSize, rung: Rung) -> Geometry {
     }
 }
 
-/// Whole tile rows that fit. A partial row is never drawn, because half an
-/// image is worse than white space (§1.2).
+/// Whole tile rows that fit; a partial row is never drawn.
 fn visible_rows(content_h: u16, tile_h: u16, rung: Rung) -> u16 {
     // On the sixel rung one content row is reserved and left blank: an image on
     // the terminal's last line can scroll the screen, and never putting one
@@ -184,9 +161,9 @@ fn visible_rows(content_h: u16, tile_h: u16, rung: Rung) -> u16 {
     ((usable + GUTTER_H) / (tile_h + GUTTER_H)).max(1)
 }
 
-// ── the thumbnail pipeline (§2) ──────────────────────────────────────
+// ── the thumbnail pipeline ───────────────────────────────────────────
 
-/// The two canonical, geometry-independent preview sizes (§2.1).
+/// The two canonical, geometry-independent preview sizes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Class {
     /// Gallery tiles: fits within 512×512 px.
@@ -212,16 +189,15 @@ impl Class {
 }
 
 /// kith refuses to decode beyond these; the tile carries the reason instead of
-/// hanging (§4.2). Apply is still offered — the backend, not kith, decides what
-/// it can set, and refusing to try would be kith inventing a limit it does not own.
+/// hanging. Apply is still offered — the backend decides what it can set.
 const MAX_MEGAPIXELS: u64 = 128;
 const MAX_BYTES_ON_DISK: u64 = 512 * 1024 * 1024;
 
-/// Memory bounds for decoded previews (§2.3), whichever binds first.
+/// Memory bounds for decoded previews, whichever binds first.
 const MEM_MAX_ENTRIES: usize = 128;
 const MEM_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The on-disk cache ceiling (§2.2).
+/// The on-disk cache ceiling.
 const DISK_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const DISK_MAX_AGE_SECS: u64 = 30 * 24 * 60 * 60;
 
@@ -237,7 +213,7 @@ struct CacheKey {
 #[derive(Clone, Debug)]
 pub enum Slot {
     Ready(Arc<DynamicImage>),
-    /// A job is queued or running; the caller draws a placeholder (§2.4).
+    /// A job is queued or running; the caller draws a placeholder.
     Pending,
     /// These bytes are not a readable image, or are past the decode guard.
     Failed(String),
@@ -247,8 +223,7 @@ struct Job {
     key: CacheKey,
     item: Item,
     cache_file: Option<PathBuf>,
-    /// Distance from the selection: priority is visual, so the tile a Person is
-    /// looking at resolves first and the rest of the screen fills outward (§2.3).
+    /// Distance from the selection: the tile a Person is looking at resolves first.
     priority: u32,
 }
 
@@ -264,14 +239,9 @@ struct Queue {
 
 /// The decode pool and the two-tier cache in front of it.
 ///
-/// Nothing here is authoritative (ADR-0001): `rm -rf ~/.cache/kith/thumbs` costs
-/// re-decodes and nothing else, and a truncated entry is treated as a miss,
-/// deleted and re-decoded rather than left as a hole in the grid.
-///
-/// *Call recorded here:* ADR-0003 §1 puts Provider calls on `spawn_blocking`. A
-/// fixed pool of native threads gives the same guarantee — the render loop never
-/// decodes — without requiring the Gallery to be constructed inside a Tokio
-/// runtime, which keeps this module testable on its own.
+/// Nothing here is authoritative: deleting the cache costs re-decodes and no
+/// information. A fixed pool of native threads keeps the render loop from
+/// decoding without requiring a Tokio runtime, which keeps this module testable.
 pub struct Thumbs {
     dir: Option<PathBuf>,
     unwritable: Option<String>,
@@ -286,16 +256,14 @@ pub struct Thumbs {
 }
 
 impl Thumbs {
-    /// The cache under `$XDG_CACHE_HOME/kith/thumbs`, outside every Circle root
-    /// by construction: a thumbnail inside the synced tree would be derived bytes
-    /// every Member pays to receive, forever (§2.2).
+    /// The cache under `$XDG_CACHE_HOME/kith/thumbs`, outside every Circle root:
+    /// a thumbnail inside the synced tree is bytes every Member pays to receive.
     pub fn new(provider: Arc<dyn Provider>) -> Self {
         let dir = directories::BaseDirs::new().map(|b| b.cache_dir().join("kith/thumbs"));
         Self::with_dir(dir, provider)
     }
 
-    /// The same cache rooted somewhere explicit. `None` means "decode into
-    /// memory only" — Preview never fails because a cache could not be written.
+    /// The same cache rooted somewhere explicit. `None` decodes into memory only.
     pub fn with_dir(dir: Option<PathBuf>, provider: Arc<dyn Provider>) -> Self {
         let (dir, unwritable) = match dir {
             Some(d) => match std::fs::create_dir_all(&d) {
@@ -318,8 +286,7 @@ impl Thumbs {
         let queue = Arc::new((Mutex::new(Queue { jobs: Vec::new(), stop: false }), Condvar::new()));
         let (done_tx, done_rx) = channel();
 
-        // Enough to fill a screen quickly, few enough that a scroll does not
-        // saturate a laptop (§2.3).
+        // Enough to fill a screen quickly, few enough not to saturate a laptop.
         let n = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1).min(4);
         let mut workers = Vec::with_capacity(n);
         for _ in 0..n {
@@ -348,8 +315,7 @@ impl Thumbs {
         self.unwritable.as_deref()
     }
 
-    /// Take delivery of everything the workers finished. Called once per frame,
-    /// before anything is drawn.
+    /// Take delivery of everything the workers finished, once per frame.
     pub fn poll(&mut self) {
         while let Ok(done) = self.done_rx.try_recv() {
             self.inflight.remove(&done.key);
@@ -362,12 +328,11 @@ impl Thumbs {
         }
     }
 
-    /// Never blocks the render loop. `Ready` = draw it now; `Pending` = draw a
-    /// placeholder; `Failed` = draw the text card with the reason.
+    /// Never blocks the render loop.
     pub fn get(&mut self, item: &Item, class: Class, priority: u32) -> Slot {
+        // No bytes on this Device: nothing to decode, and the caller is already
+        // drawing the "bytes not here yet" field.
         let Some(key) = Self::key(item, class) else {
-            // No bytes on this Device: there is nothing to decode, and the
-            // caller is already drawing the "bytes not here yet" field.
             return Slot::Pending;
         };
         if let Some(img) = self.mem.get(&key) {
@@ -384,7 +349,7 @@ impl Thumbs {
         Slot::Pending
     }
 
-    /// Queue ahead of need, at lower priority than anything visible (§2.3).
+    /// Queue ahead of need, at lower priority than anything visible.
     pub fn prefetch(&mut self, items: impl Iterator<Item = Item>, class: Class) {
         for item in items {
             let Some(key) = Self::key(&item, class) else { continue };
@@ -400,15 +365,20 @@ impl Thumbs {
     /// Drop queued jobs for Items no longer near the viewport. A decode already
     /// running finishes and is cached — the work is paid for either way.
     pub fn retain(&mut self, keep: &HashSet<String>) {
+        let mut dropped: Vec<CacheKey> = Vec::new();
         let mut q = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
-        let before: HashSet<CacheKey> = q.jobs.iter().map(|j| j.key.clone()).collect();
-        q.jobs.retain(|j| keep.contains(&j.key.id));
-        let after: HashSet<CacheKey> = q.jobs.iter().map(|j| j.key.clone()).collect();
+        q.jobs.retain(|j| {
+            let keeping = keep.contains(&j.key.id);
+            if !keeping {
+                dropped.push(j.key.clone());
+            }
+            keeping
+        });
         drop(q);
         // Only a job that left the *queue* stops being in flight. A job already
         // running is still in flight and will report itself done.
-        for key in before.difference(&after) {
-            self.inflight.remove(key);
+        for key in dropped {
+            self.inflight.remove(&key);
         }
     }
 
@@ -470,14 +440,12 @@ impl Drop for Thumbs {
     }
 }
 
-/// What one decoded preview costs in memory, for the LRU's byte budget.
+/// What one decoded preview costs in memory.
 fn decoded_bytes(img: &DynamicImage) -> u64 {
     u64::from(img.width()) * u64::from(img.height()) * 4
 }
 
-/// What the cache is keyed on: the content hash where there is one, else the
-/// Item id. An Item whose record carries no hash still gets a decode; it just
-/// gets no disk entry, because there is nothing content-addressed to name it by.
+/// The content hash where there is one, else the Item id.
 fn content_key(item: &Item) -> String {
     match &item.hash {
         Some(h) => h.strip_prefix("b3:").unwrap_or(h).to_string(),
@@ -485,13 +453,8 @@ fn content_key(item: &Item) -> String {
     }
 }
 
-/// ADR-0003 §5's shape exactly: `<content-hash>-<class>.png`, with the `b3:`
-/// prefix stripped — 64 hex characters and nothing else.
-///
-/// Note what is *not* in this name: no tile width, no cell size, no Item id and
-/// no path. That is the whole point of §2.1 — a resize never invalidates an
-/// entry, a rename never invalidates one, and two Items with identical bytes
-/// share one.
+/// `<content-hash>-<class>.png`. No tile width, no cell size, no Item id and no
+/// path: a resize must never invalidate an entry, nor a rename.
 fn cache_file(dir: &Path, hash: &str, class: Class) -> PathBuf {
     let bare = hash.strip_prefix("b3:").unwrap_or(hash);
     dir.join(format!("{bare}-{}.png", class.suffix()))
@@ -530,7 +493,7 @@ fn decode(job: &Job, provider: &dyn Provider) -> Result<Arc<DynamicImage>, Strin
         match image::open(cached) {
             Ok(img) => return Ok(Arc::new(img)),
             Err(_) if cached.exists() => {
-                // A truncated or unreadable entry is a miss, not a hole (§2.2).
+                // A truncated or unreadable entry is a miss, not a hole.
                 let _ = std::fs::remove_file(cached);
             }
             Err(_) => {}
@@ -543,7 +506,7 @@ fn decode(job: &Job, provider: &dyn Provider) -> Result<Arc<DynamicImage>, Strin
         .as_ref()
         .ok_or_else(|| "bytes not here yet".to_string())?;
 
-    // The decode guard is the core's policy, not a Provider's (§4.2).
+    // The decode guard is the core's policy, not a Provider's.
     if let Ok(md) = std::fs::metadata(path)
         && md.len() > MAX_BYTES_ON_DISK
     {
@@ -562,8 +525,7 @@ fn decode(job: &Job, provider: &dyn Provider) -> Result<Arc<DynamicImage>, Strin
             }
             Ok(Arc::new(*img))
         }
-        // The text tier is the one that must never fail; here it means the
-        // Provider had nothing to picture, which is a caption, not a crash.
+        // The Provider had nothing to picture: a caption, not a crash.
         Ok(Preview::Text(t)) => Err(t),
         Err(e) => Err(e.to_string()),
     }
@@ -575,10 +537,8 @@ impl Job {
     }
 }
 
-/// `<hash>-<class>.png.tmp` in the same directory, `fsync`, `rename(2)` — two
-/// kith processes never see half a PNG (§2.2). A failure here is silent on
-/// purpose: the image is already decoded and about to be drawn, and the cache is
-/// an optimisation, never a precondition.
+/// Write to `.tmp`, `fsync`, `rename(2)`, so two kith processes never see half a
+/// PNG. Failure is silent: the cache is an optimisation, never a precondition.
 fn write_png_atomically(final_path: &Path, img: &DynamicImage) {
     let mut buf = std::io::Cursor::new(Vec::new());
     if img.write_to(&mut buf, image::ImageFormat::Png).is_err() {
@@ -597,14 +557,8 @@ fn write_png_atomically(final_path: &Path, img: &DynamicImage) {
 }
 
 /// Bound the directory: drop stale entries, then evict oldest-first until it is
-/// under the ceiling (§2.2).
-///
-/// *Call recorded here:* the spec sweeps entries "not read for 30 days" and
-/// entries whose hash is in no Collection. Neither is available to this module —
-/// there is no portable atime touch in kith's dependency set, and `Thumbs` holds
-/// no Collections — so the sweep uses write time and size alone. That is
-/// strictly more aggressive than the spec allows, and being more aggressive with
-/// a rebuildable cache costs a re-decode and nothing else.
+/// under the ceiling. Write time stands in for read time, which is more
+/// aggressive than needed — and over a rebuildable cache that costs a re-decode.
 fn sweep_in_background(dir: PathBuf) {
     std::thread::spawn(move || {
         let Ok(entries) = std::fs::read_dir(&dir) else { return };
@@ -639,44 +593,38 @@ fn sweep_in_background(dir: PathBuf) {
 
 // ── tiles ────────────────────────────────────────────────────────────
 
-/// What kith actually knows about one tile — and, as importantly, what it does not.
+/// What kith knows about one tile — and, as importantly, what it does not.
 ///
-/// The three states are rendered distinctly because collapsing them would make
-/// kith lie in one of the two directions that matter: pretending an Item is here
-/// when its bytes are not, or hiding bytes that are here because no record names
-/// them yet. A Device holding a Circle's content is a fact the Circle is
-/// entitled to see.
+/// Collapsing the three states would make kith lie in one of two directions:
+/// pretending an Item is here when its bytes are not, or hiding bytes that are
+/// here because no record names them yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Knowledge {
     /// Record and bytes both present. The ordinary case.
     Recorded,
-    /// The record arrived and the bytes have not (§4.1). A full citizen of the
-    /// grid: it sorts, it selects, it previews, and Favourite and Delete work on it.
+    /// The record arrived and the bytes have not. A full citizen of the grid: it
+    /// sorts, it selects, it previews, and Favourite and Delete work on it.
     RecordOnly,
-    /// Bytes are on disk that no record names yet — a Member's content landing
-    /// ahead of their log. It resolves itself in seconds; until then kith names
-    /// it and refuses to guess whose it is.
+    /// Bytes on disk that no record names yet, which resolves itself in seconds.
     BytesOnly,
 }
 
 #[derive(Clone, Debug)]
 struct Tile {
-    /// The selection anchor. An Item id where there is one; otherwise the path,
-    /// so an unrecorded arrival still has a stable handle for one Gallery session.
+    /// The selection anchor: an Item id where there is one, else the path.
     key: String,
     id: Option<ItemId>,
     title: String,
     item: Option<Item>,
-    /// Whole seconds since the epoch, after §1.3's clock-honesty clamp.
+    /// Whole seconds since the epoch, after the clock-honesty clamp.
     sort_at: i64,
-    /// The record claimed a time this Device's clock cannot believe (§1.3).
+    /// The record claimed a time this Device's clock cannot believe.
     skewed: bool,
     knowledge: Knowledge,
 }
 
-/// What the content area says when the grid has nothing in it (§1.8). Never a
-/// bare empty grid: a Person who just joined and sees nothing needs to know
-/// whether that is a bug.
+/// What the content area says when the grid has nothing in it — never a bare
+/// empty grid, which a Person cannot tell from a bug.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Emptiness {
     /// A Circle exists and holds no Items.
@@ -694,32 +642,33 @@ pub enum Emptiness {
 /// Collection, newest first, with a favourite marker and an unseen dot.
 pub struct Gallery {
     tiles: Vec<Tile>,
+    /// Indices into `tiles`, in sort order, after the favourites filter. Held
+    /// rather than recomputed: it is read several times per frame.
+    view: Vec<usize>,
     /// The selection, anchored to a tile key rather than to an index. Arrival
-    /// re-sorts the grid around it and cannot move it (§1.5, §7.5).
+    /// re-sorts the grid around it and cannot move it.
     sel_key: Option<String>,
     /// First visible tile row.
     top_row: usize,
 
     favourites: HashSet<ItemId>,
     unseen: HashSet<ItemId>,
-    /// Items unfavourited while the filter is on. They keep their place until
-    /// the Person leaves the favourites view, so nothing vanishes under the
-    /// cursor as a result of the Person's own keystroke (§1.6).
+    /// Items unfavourited while the filter is on. They keep their place until the
+    /// Person leaves the favourites view, so nothing vanishes under the cursor as
+    /// a result of the Person's own keystroke.
     sticky: HashSet<ItemId>,
     filter: bool,
 
-    /// When this Device first saw each tile. Rebuildable by construction — after
-    /// a rebuild it is the rebuild time, which affects nothing except the
-    /// position of records that were already lying about their date (§1.3).
+    /// When this Device first saw each tile. Rebuildable: after a rebuild it is
+    /// the rebuild time, which only moves records already lying about their date.
     first_seen: HashMap<String, i64>,
 
     picker: Picker,
     rung: Rung,
     cell: CellSize,
     thumbs: Thumbs,
-    /// The encoded escape payload per visible tile, keyed by tile and geometry
-    /// (§2.3). This is what keeps a scroll from re-encoding every image every
-    /// frame; it is dropped when the tile leaves the viewport.
+    /// The encoded escape payload per visible tile, keyed by tile and geometry —
+    /// what keeps a scroll from re-encoding every image every frame.
     protocols: HashMap<(String, u16, u16), StatefulProtocol>,
 
     /// Geometry of the last painted frame — the geometry the Person was looking
@@ -729,11 +678,11 @@ pub struct Gallery {
 
     pending_g: bool,
     status: Option<String>,
-    /// The reason the last thumbnail refused to decode, for the `!` overlay (§6.7).
+    /// The reason the last thumbnail refused to decode, for the `!` overlay.
     last_failure: Option<String>,
     said_favourite_promise: bool,
-    /// Items marked seen since the caller last drained them, for its own
-    /// debounced flush to `state.toml`. Local, and the Circle never learns it (§3.3).
+    /// Items marked seen since the caller last drained them. Local, and the
+    /// Circle never learns it.
     newly_seen: Vec<ItemId>,
 
     emptiness: Emptiness,
@@ -741,11 +690,8 @@ pub struct Gallery {
 }
 
 impl Gallery {
-    /// A Gallery over the Collection's Items, newest first.
-    ///
-    /// The preview rung defaults to halfblocks — the shipped fallback, so a
-    /// Gallery built before the terminal has been queried is degraded, never
-    /// broken. The app calls [`Gallery::set_picker`] once detection has run.
+    /// A Gallery over the Collection's Items, newest first. The rung defaults to
+    /// halfblocks until the app calls [`Gallery::set_picker`].
     pub fn new(items: Vec<Item>) -> Self {
         Self::with_thumbs(items, Thumbs::new(Arc::new(WallpaperProvider::default())))
     }
@@ -756,6 +702,7 @@ impl Gallery {
         let picker = Picker::halfblocks();
         let mut g = Self {
             tiles: Vec::new(),
+            view: Vec::new(),
             sel_key: None,
             top_row: 0,
             favourites: HashSet::new(),
@@ -786,9 +733,8 @@ impl Gallery {
 
     // ── wiring the app supplies ──────────────────────────────────────
 
-    /// Adopt the detected preview rung and cell size (§8). Detection runs once
-    /// at startup; the rung is not re-queried, because a terminal does not change
-    /// protocol mid-session.
+    /// Adopt the detected preview rung and cell size. Detection runs once at
+    /// startup: a terminal does not change protocol mid-session.
     pub fn set_picker(&mut self, picker: Picker) {
         self.rung = Rung::from(picker.protocol_type());
         self.cell = CellSize { w_px: picker.font_size().width, h_px: picker.font_size().height };
@@ -797,33 +743,29 @@ impl Gallery {
         self.protocols.clear();
     }
 
-    pub fn rung(&self) -> Rung {
-        self.rung
-    }
-
     /// The one `warn` note the preview cache can raise (`cache.unwritable`).
     pub fn cache_warning(&self) -> Option<&str> {
         self.thumbs.warning()
     }
 
     /// The last thumbnail that would not decode, for the `!` detail overlay.
-    /// Preview explains it in full; the tile only carries `!` (§4.2, §6.7).
     pub fn last_failure(&self) -> Option<&str> {
         self.last_failure.as_deref()
     }
 
-    /// This Person's private marks. Never synced, never announced (§3.3, §6.2).
+    /// This Person's private marks. Never synced, never announced.
     pub fn set_favourites(&mut self, favourites: HashSet<ItemId>) {
         self.favourites = favourites;
+        self.recompute_view();
     }
 
-    /// The Items this Device has not shown the Person yet (§3).
+    /// The Items this Device has not shown the Person yet.
     pub fn set_unseen(&mut self, unseen: HashSet<ItemId>) {
         self.unseen = unseen;
     }
 
-    /// Bytes sitting in the Circle that no record names yet — the arriving
-    /// state (§4.1's reverse window). Paths, because there is no Item to name.
+    /// Bytes sitting in the Circle that no record names yet. Paths, because there
+    /// is no Item to name.
     pub fn set_arriving(&mut self, paths: Vec<PathBuf>) {
         let items = self.recorded_items();
         self.rebuild(items, paths);
@@ -833,21 +775,20 @@ impl Gallery {
         self.emptiness = emptiness;
     }
 
-    /// The other Members' display names, for §1.8's empty states. One name is
-    /// used verbatim; more than one becomes "the other Members'".
+    /// The other Members' display names, for the empty states. One name is used
+    /// verbatim; more than one becomes "the other Members'".
     pub fn set_other_members(&mut self, names: Vec<String>) {
         self.other_members = names;
     }
 
-    // ── live arrival (§1.7) ──────────────────────────────────────────
+    // ── live arrival ─────────────────────────────────────────────────
 
-    /// Take a new `CollectionView` after `ItemsChanged`.
+    /// Take a new set of Items after the tree changed.
     ///
     /// **The selected Item stays selected and stays where it is on screen.** New
-    /// Items sort to the top and the viewport index shifts to compensate. This is
-    /// a small scheduling detail with a consent-shaped consequence: pressing `a`
-    /// must apply what was under the cursor when the Person decided to press it,
-    /// not whatever a Member added half a second earlier (§1.5, §7.5).
+    /// Items sort to the top and the viewport index shifts to compensate: pressing
+    /// `a` must apply what was under the cursor when the Person decided to press
+    /// it, not whatever a Member added half a second earlier.
     pub fn update(&mut self, items: Vec<Item>) {
         let arriving = self.arriving_paths();
         let before = self.screen_row_of_selection();
@@ -857,31 +798,30 @@ impl Gallery {
 
     /// Drop a tile after the caller has confirmed and performed a Delete. The
     /// selection moves to the next Item in sort order, or the previous one if the
-    /// deleted Item was last (§1.5).
+    /// deleted Item was last.
     pub fn remove(&mut self, id: &ItemId) {
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        let was_selected = view
+        let pos = self.sel_pos();
+        let was_selected = self
+            .view
             .get(pos)
             .map(|&i| self.tiles[i].id.as_ref() == Some(id))
             .unwrap_or(false);
         self.tiles.retain(|t| t.id.as_ref() != Some(id));
         self.protocols.retain(|(k, _, _), _| k.as_str() != id.as_str());
+        self.recompute_view();
         if was_selected {
-            let view = self.view();
-            if view.is_empty() {
+            if self.view.is_empty() {
                 self.sel_key = None;
             } else {
-                let next = pos.min(view.len() - 1);
-                self.sel_key = Some(self.tiles[view[next]].key.clone());
+                let next = pos.min(self.view.len() - 1);
+                self.sel_key = Some(self.tiles[self.view[next]].key.clone());
             }
         }
     }
 
-    /// Marks an Item seen. Opening it in Preview or performing any Action on it
-    /// are the only two things that do — selecting a tile does not, nor does
-    /// scrolling past it, nor does its thumbnail decoding. A dot that clears
-    /// because a grid reflowed under a held-down `j` is a dot nobody can trust (§3.1).
+    /// Marks an Item seen. Opening it in Preview or performing an Action on it
+    /// are the only two things that do: a dot that cleared because a grid
+    /// reflowed under a held-down `j` is a dot nobody can trust.
     pub fn mark_seen(&mut self, id: &ItemId) {
         if self.unseen.remove(id) {
             self.newly_seen.push(id.clone());
@@ -889,20 +829,19 @@ impl Gallery {
     }
 
     /// Hand the caller the marks to flush to `state.toml`. Local state, written
-    /// outside every Circle root: no mis-edited ignore pattern can leak it,
-    /// because there is nothing inside the tree to leak (§3.3).
+    /// outside every Circle root, so there is nothing inside the tree to leak.
     pub fn drain_newly_seen(&mut self) -> Vec<ItemId> {
         std::mem::take(&mut self.newly_seen)
     }
 
     // ── what the frame around this screen shows ──────────────────────
 
-    /// The title row's right-aligned count (cli-tui.md §6.1). The unseen figure
-    /// is this Person's dots on this Device and is not derivable by anyone else.
+    /// The title row's right-aligned count. The unseen figure is this Person's
+    /// dots on this Device and is not derivable by anyone else.
     pub fn title_row(&self) -> String {
         let total = self.tiles.iter().filter(|t| t.id.is_some()).count();
         if self.filter {
-            let shown = self.view().len();
+            let shown = self.view.len();
             return format!("{shown} favourites of {total}");
         }
         let unseen = self
@@ -931,57 +870,50 @@ impl Gallery {
     }
 
     /// The selected Item, if the selected tile has a record. An arriving tile
-    /// (bytes with no record) has no Item id and therefore cannot be the subject
-    /// of an Action.
+    /// (bytes with no record) cannot be the subject of an Action.
     pub fn selected(&self) -> Option<&ItemId> {
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        view.get(pos).and_then(|&i| self.tiles[i].id.as_ref())
+        self.view.get(self.sel_pos()).and_then(|&i| self.tiles[i].id.as_ref())
     }
 
-    /// Whether the favourites filter — v0.1's only filter — is on. It is
-    /// deliberately not persisted: a remembered invisible filter is how People
-    /// conclude their content has vanished (§1.6).
+    /// Whether the favourites filter is on. Deliberately not persisted: a
+    /// remembered invisible filter is how People conclude their content vanished.
     pub fn filtered(&self) -> bool {
         self.filter
     }
 
-    // ── keys (§1.5, §6) ──────────────────────────────────────────────
+    // ── keys ─────────────────────────────────────────────────────────
 
     /// Route one key. Returns the Action the Person asked for, if any.
     ///
     /// Keys this screen does not claim — `y`, `Space`, `!`, `?`, `c`, `m`, `Esc`,
-    /// `Ctrl-C` — fall through as `None` so the app's global handler sees them,
-    /// which is cli-tui.md §6.2's overlay → screen → global routing. Grid
-    /// movement at a boundary is silent; only a genuinely unbound key gets
-    /// `no binding for 'z'`, and that judgement belongs to the global handler
-    /// which knows the whole keymap.
+    /// `Ctrl-C` — fall through as `None` so the app's global handler sees them.
+    /// Movement at a boundary is silent; only a genuinely unbound key is named,
+    /// and that judgement belongs to the handler that knows the whole keymap.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<GalleryAction> {
         if key.kind == KeyEventKind::Release {
             return None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let view = self.view();
-        let len = view.len();
-        let pos = self.sel_pos(&view);
+        let len = self.view.len();
+        let pos = self.sel_pos();
         let cols = self.cols.max(1);
         let rows = self.rows.max(1);
 
         // The one chord in the keymap. Any other key ends it.
         let pending_g = std::mem::take(&mut self.pending_g);
         if pending_g && !ctrl && key.code == KeyCode::Char('g') {
-            self.select(&view, 0);
+            self.select(0);
             return None;
         }
 
         if ctrl {
             match key.code {
                 KeyCode::Char('d') => {
-                    self.select(&view, (pos + cols * rows / 2).min(len.saturating_sub(1)));
+                    self.select((pos + cols * rows / 2).min(len.saturating_sub(1)));
                     return None;
                 }
                 KeyCode::Char('u') => {
-                    self.select(&view, pos.saturating_sub(cols * rows / 2));
+                    self.select(pos.saturating_sub(cols * rows / 2));
                     return None;
                 }
                 // Ctrl-C is the app's: it quits immediately and restores the
@@ -991,32 +923,32 @@ impl Gallery {
         }
 
         match key.code {
-            // Movement. The grid is a linear list wrapped for display, so `h`
-            // and `l` never dead-end in a corner; `j` and `k` keep the column.
+            // The grid is a linear list wrapped for display, so `h` and `l` never
+            // dead-end in a corner; `j` and `k` keep the column.
             KeyCode::Char('h') | KeyCode::Left => {
-                self.select(&view, pos.saturating_sub(1));
+                self.select(pos.saturating_sub(1));
                 None
             }
             KeyCode::Char('l') | KeyCode::Right => {
-                self.select(&view, (pos + 1).min(len.saturating_sub(1)));
+                self.select((pos + 1).min(len.saturating_sub(1)));
                 None
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.select(&view, (pos + cols).min(len.saturating_sub(1)));
+                self.select((pos + cols).min(len.saturating_sub(1)));
                 None
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if pos >= cols {
-                    self.select(&view, pos - cols);
+                    self.select(pos - cols);
                 }
                 None
             }
             KeyCode::PageDown => {
-                self.select(&view, (pos + cols * rows).min(len.saturating_sub(1)));
+                self.select((pos + cols * rows).min(len.saturating_sub(1)));
                 None
             }
             KeyCode::PageUp => {
-                self.select(&view, pos.saturating_sub(cols * rows));
+                self.select(pos.saturating_sub(cols * rows));
                 None
             }
             KeyCode::Char('g') => {
@@ -1024,11 +956,11 @@ impl Gallery {
                 None
             }
             KeyCode::Home => {
-                self.select(&view, 0);
+                self.select(0);
                 None
             }
             KeyCode::Char('G') | KeyCode::End => {
-                self.select(&view, len.saturating_sub(1));
+                self.select(len.saturating_sub(1));
                 None
             }
 
@@ -1038,8 +970,8 @@ impl Gallery {
                 None
             }
 
-            // Item-focused Actions. Each marks the Item seen, because each is a
-            // deliberate engagement with that specific Item (§3.1).
+            // Each Item-focused Action marks the Item seen, because each is a
+            // deliberate engagement with that specific Item.
             KeyCode::Enter => self.act(GalleryAction::Open),
             KeyCode::Char('a') => self.act(GalleryAction::Apply),
             KeyCode::Char('r') => self.act(GalleryAction::Reveal),
@@ -1061,15 +993,12 @@ impl Gallery {
 
     // ── rendering ────────────────────────────────────────────────────
 
-    /// Draw the grid into the content area. The three fixed frame rows are the
-    /// app's (cli-tui.md §6.1); this draws inside `area` and nowhere else.
+    /// Draw the grid inside `area` and nowhere else; the frame rows are the app's.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         self.thumbs.poll();
 
         let term = frame.area();
         if term.width < MIN_TERM_W || term.height < MIN_TERM_H {
-            // The frame rows stay, so nothing is lost and resizing back restores
-            // the grid with the same Item selected (§1.2).
             lines(
                 frame,
                 area,
@@ -1085,8 +1014,7 @@ impl Gallery {
             return;
         }
 
-        let view = self.view();
-        if view.is_empty() {
+        if self.view.is_empty() {
             lines(frame, area, &self.empty_state());
             return;
         }
@@ -1097,36 +1025,34 @@ impl Gallery {
         self.rows = rows;
 
         // Reflow keeps the selection: the grid is re-laid around the same Item.
-        let pos = self.sel_pos(&view);
-        self.clamp_viewport(view.len(), pos);
+        let len = self.view.len();
+        let pos = self.sel_pos();
+        self.clamp_viewport(len, pos);
         let top = self.top_row;
 
-        let first = (top * self.cols).min(view.len());
-        let last = ((top + rows) * self.cols).min(view.len()).max(first);
-        let visible: Vec<usize> = view[first..last].to_vec();
-
-        // Drop queued decodes and encoded payloads for tiles that have left the
-        // viewport; a decode already running finishes and is cached anyway. The
-        // margin is one screenful either side, which is also what prefetch fills.
+        let first = (top * self.cols).min(len);
+        let last = ((top + rows) * self.cols).min(len).max(first);
+        // The margin is one screenful either side, which is also what prefetch
+        // fills; everything outside it is dropped below.
         let margin = self.cols * rows;
-        let near: HashSet<String> = view[first.saturating_sub(margin)..(last + margin).min(view.len())]
+        let visible: Vec<usize> = self.view[first..last].to_vec();
+        let near: HashSet<String> = self.view[first.saturating_sub(margin)..(last + margin).min(len)]
             .iter()
             .filter_map(|&i| self.tiles[i].item.as_ref())
             .map(content_key)
             .collect();
-        self.thumbs.retain(&near);
-        // An encoded payload is worth keeping only for a tile that is on screen
-        // *at this geometry*; a reflow makes every one of them stale.
         let onscreen: HashSet<String> = visible.iter().map(|&i| self.tiles[i].key.clone()).collect();
-        self.protocols
-            .retain(|(k, w, h), _| onscreen.contains(k) && *w == g.tile_w && *h == g.img_h);
-
-        // One screenful ahead in the direction of travel, at lower priority than
-        // anything visible (§2.3).
-        let ahead: Vec<Item> = view[last..(last + margin).min(view.len())]
+        let ahead: Vec<Item> = self.view[last..(last + margin).min(len)]
             .iter()
             .filter_map(|&i| self.tiles[i].item.clone())
             .collect();
+
+        // A decode already running finishes and is cached anyway. An encoded
+        // payload, though, is worth keeping only for a tile on screen *at this
+        // geometry*: a reflow makes every one of them stale.
+        self.thumbs.retain(&near);
+        self.protocols
+            .retain(|(k, w, h), _| onscreen.contains(k) && *w == g.tile_w && *h == g.img_h);
         self.thumbs.prefetch(ahead.into_iter(), Class::Thumb);
 
         for (n, &tile_idx) in visible.iter().enumerate() {
@@ -1138,8 +1064,6 @@ impl Gallery {
                 break;
             }
             let selected = first + n == pos;
-            // Priority is visual: the tile a Person is looking at resolves first
-            // and the rest of the screen fills outward (§2.3).
             let distance = (first + n).abs_diff(pos) as u32;
             self.draw_tile(frame, tile_idx, Rect::new(x, y, g.tile_w, g.tile_h), g, selected, distance);
         }
@@ -1158,8 +1082,7 @@ impl Gallery {
         let cap_rect = Rect::new(rect.x, rect.y + g.img_h, g.tile_w, 1);
 
         // Selection is drawn *outside* the image: on the pixel rungs the image
-        // widget owns its cells and a highlight painted over the picture is not
-        // available at all (§1.4).
+        // widget owns its cells and cannot be painted over.
         if selected && rect.x > 0 {
             let bar = Rect::new(rect.x - 1, rect.y, 1, g.tile_h);
             let body: Vec<Line<'static>> = (0..g.tile_h).map(|_| Line::from("▌")).collect();
@@ -1169,16 +1092,14 @@ impl Gallery {
         let knowledge = self.tiles[idx].knowledge;
 
         match knowledge {
-            // The record is here and the bytes are not. A dim field with `↓` —
-            // and no progress bar, because the Sync Engine reports completion per
-            // Circle and per peer, never per path, and inventing a per-Item
-            // percentage from a Circle-level one would be a fabricated number (§4.1).
+            // No progress bar: the Sync Engine reports completion per Circle and
+            // per peer, never per path, and a per-Item percentage derived from a
+            // Circle-level one would be a fabricated number.
             Knowledge::RecordOnly => {
                 frame.render_widget(field(g.tile_w, g.img_h, '▒', Some('↓')), img_rect);
             }
-            // Bytes with no record. kith draws no picture here: nothing has said
-            // this is an Item of this Collection, and guessing would be kith
-            // asserting a fact it does not have. It names it and waits (§4.1).
+            // Bytes with no record: nothing has said this is an Item of this
+            // Collection, so kith names it and waits rather than guessing.
             Knowledge::BytesOnly => {
                 frame.render_widget(field(g.tile_w, g.img_h, '░', Some('⋯')), img_rect);
             }
@@ -1187,13 +1108,12 @@ impl Gallery {
                 match self.thumbs.get(&item, Class::Thumb, distance) {
                     Slot::Ready(img) => {
                         let key = (self.tiles[idx].key.clone(), g.tile_w, g.img_h);
-                        let proto = self.protocols.entry(key).or_insert_with(|| {
-                            // The expensive step — decoding a 4–8 MB wallpaper —
-                            // already happened on a worker. What happens here is a
-                            // downscale of a ≤512 px thumbnail, which is what makes
-                            // rendering a stateful image on the UI thread safe (§2.1).
-                            self.picker.new_resize_protocol((*img).clone())
-                        });
+                        // Only a ≤512 px downscale happens here; the expensive
+                        // decode already happened on a worker.
+                        let proto = self
+                            .protocols
+                            .entry(key)
+                            .or_insert_with(|| self.picker.new_resize_protocol((*img).clone()));
                         frame.render_stateful_widget(
                             StatefulImage::default().resize(Resize::Fit(Some(FilterType::Triangle))),
                             img_rect,
@@ -1201,12 +1121,12 @@ impl Gallery {
                         );
                     }
                     // No spinner: a screenful of spinners is noise, and the image
-                    // is about to appear (§2.4).
+                    // is about to appear.
                     Slot::Pending => {
                         frame.render_widget(field(g.tile_w, g.img_h, '░', None), img_rect)
                     }
                     // Bytes present, not decodable. The tile carries `!` and
-                    // Preview explains; kith never leaves a hole (§4.2).
+                    // Preview explains; kith never leaves a hole.
                     Slot::Failed(why) => {
                         frame.render_widget(field(g.tile_w, g.img_h, '▒', Some('!')), img_rect);
                         self.last_failure = Some(why);
@@ -1215,14 +1135,13 @@ impl Gallery {
             }
         }
 
-        // The caption row is always drawn, in every state. The grid never has a
-        // hole: an Item kith cannot picture is still an Item kith can name (§2.4).
+        // Always drawn: an Item kith cannot picture is still one kith can name.
         let caption = self.caption(idx, g.tile_w);
         let style = if selected { Style::new().reversed() } else { Style::new() };
         frame.render_widget(Paragraph::new(Line::from(caption)).style(style), cap_rect);
     }
 
-    /// Markers then title, in §1.4's fixed order: `★` favourite, `●` unseen,
+    /// Markers then title, in a fixed order: `★` favourite, `●` unseen,
     /// `?` clock-skewed, `↓` bytes not here.
     fn caption(&self, idx: usize, width: u16) -> String {
         let t = &self.tiles[idx];
@@ -1295,11 +1214,9 @@ impl Gallery {
 
     fn rebuild(&mut self, items: Vec<Item>, arriving: Vec<PathBuf>) {
         let now = now_secs();
-        // §1.3's clock-honesty guard: a record claiming a time more than 24 hours
-        // ahead of this Device's clock is sorted at its *arrival* position, not
-        // its claimed one. The Gallery's spine is a date sort, and one Device with
-        // a wrong clock must not be able to pin itself to the top of everyone's
-        // screen forever. Preview still shows the claimed date, marked.
+        // The clock-honesty guard: a record claiming a time more than 24 hours
+        // ahead sorts at its *arrival* position, so one Device with a wrong clock
+        // cannot pin itself to the top of everyone's screen forever.
         let horizon = now + 24 * 60 * 60;
 
         let mut tiles = Vec::with_capacity(items.len() + arriving.len());
@@ -1310,8 +1227,7 @@ impl Gallery {
             let (sort_at, skewed) = match claimed {
                 Some(at) if at > horizon => (seen_at, true),
                 Some(at) => (at, false),
-                // An unreadable date is a different problem from a dishonest one,
-                // so it takes the arrival position without claiming skew.
+                // An unreadable date is not a dishonest one: no skew marker.
                 None => (seen_at, false),
             };
             let knowledge = if item.path.is_some() {
@@ -1349,11 +1265,11 @@ impl Gallery {
         }
 
         // Newest first. Ties break on the key descending — Item ids are ULIDs and
-        // therefore time-ordered, so the order is stable, deterministic and
-        // identical on every Device, which is what keeps the Gallery and
-        // `kith list items` from ever disagreeing (§1.3).
+        // so time-ordered, which keeps the Gallery and `kith list items` from ever
+        // disagreeing.
         tiles.sort_by(|a, b| b.sort_at.cmp(&a.sort_at).then_with(|| b.key.cmp(&a.key)));
         self.tiles = tiles;
+        self.recompute_view();
 
         if self.sel_key.is_none() {
             self.sel_key = self.tiles.first().map(|t| t.key.clone());
@@ -1361,10 +1277,10 @@ impl Gallery {
     }
 
     /// Indices into `tiles`, in sort order, after the favourites filter.
-    fn view(&self) -> Vec<usize> {
-        (0..self.tiles.len())
-            .filter(|&i| !self.filter || self.in_filter(i))
-            .collect()
+    fn recompute_view(&mut self) {
+        let view: Vec<usize> =
+            (0..self.tiles.len()).filter(|&i| !self.filter || self.in_filter(i)).collect();
+        self.view = view;
     }
 
     fn in_filter(&self, i: usize) -> bool {
@@ -1374,21 +1290,22 @@ impl Gallery {
         }
     }
 
-    fn sel_pos(&self, view: &[usize]) -> usize {
+    fn sel_pos(&self) -> usize {
         self.sel_key
             .as_ref()
-            .and_then(|k| view.iter().position(|&i| self.tiles[i].key == *k))
+            .and_then(|k| self.view.iter().position(|&i| self.tiles[i].key == *k))
             .unwrap_or(0)
     }
 
-    fn select(&mut self, view: &[usize], pos: usize) {
-        let Some(&i) = view.get(pos) else { return };
+    fn select(&mut self, pos: usize) {
+        let Some(&i) = self.view.get(pos) else { return };
         self.sel_key = Some(self.tiles[i].key.clone());
-        self.clamp_viewport(view.len(), pos);
+        let len = self.view.len();
+        self.clamp_viewport(len, pos);
     }
 
     /// The viewport follows the selection with no scroll margin: tiles are tall
-    /// enough that a margin would waste a third of the screen (§1.5).
+    /// enough that a margin would waste a third of the screen.
     fn clamp_viewport(&mut self, len: usize, pos: usize) {
         let cols = self.cols.max(1);
         let rows = self.rows.max(1);
@@ -1403,58 +1320,52 @@ impl Gallery {
     }
 
     fn screen_row_of_selection(&self) -> usize {
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        (pos / self.cols.max(1)).saturating_sub(self.top_row)
+        (self.sel_pos() / self.cols.max(1)).saturating_sub(self.top_row)
     }
 
     fn restore_screen_row(&mut self, screen_row: usize) {
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        self.top_row = (pos / self.cols.max(1)).saturating_sub(screen_row);
+        self.top_row = (self.sel_pos() / self.cols.max(1)).saturating_sub(screen_row);
     }
 
     fn toggle_filter(&mut self) {
         self.filter = !self.filter;
         // Re-entering the filter drops anything that was only being kept in view.
         self.sticky.clear();
-        // The selected Item is preserved if it is in the filtered set; otherwise
-        // the selection moves to the nearest Item in sort order that is (§1.6).
-        let view = self.view();
-        if view.is_empty() {
+        self.recompute_view();
+        if self.view.is_empty() {
             self.sel_key = None;
             return;
         }
+        // The selected Item is preserved if it is in the filtered set; otherwise
+        // the selection moves to the nearest Item in sort order that is.
         let anchor = self
             .sel_key
             .as_ref()
             .and_then(|k| self.tiles.iter().position(|t| t.key == *k));
         if let Some(anchor) = anchor
-            && !view.contains(&anchor)
+            && !self.view.contains(&anchor)
         {
-            let nearest = view
+            let nearest = self
+                .view
                 .iter()
                 .copied()
                 .min_by_key(|&i| i.abs_diff(anchor))
                 .expect("view is not empty");
             self.sel_key = Some(self.tiles[nearest].key.clone());
         }
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        self.clamp_viewport(view.len(), pos);
+        let len = self.view.len();
+        let pos = self.sel_pos();
+        self.clamp_viewport(len, pos);
     }
 
     /// Every Action is a deliberate engagement with the selected Item, so every
-    /// Action marks it seen (§3.1).
+    /// Action marks it seen.
     fn act(&mut self, make: fn(ItemId) -> GalleryAction) -> Option<GalleryAction> {
-        let view = self.view();
-        let pos = self.sel_pos(&view);
-        let tile = view.get(pos).map(|&i| &self.tiles[i])?;
+        let pos = self.sel_pos();
+        let tile = self.view.get(pos).map(|&i| &self.tiles[i])?;
         let Some(id) = tile.id.clone() else {
-            // An arriving tile has bytes and no record: kith does not yet know
-            // whose it is, what Collection claims it, or whether the Provider
-            // does. It resolves in seconds, and until then there is nothing
-            // honest to act on.
+            // An arriving tile has bytes and no record: until the record lands
+            // there is nothing honest to act on.
             self.status =
                 Some("no record for these bytes yet — it arrives with that Member's log".into());
             return None;
@@ -1464,12 +1375,12 @@ impl Gallery {
     }
 
     /// The `★` moves on the keystroke; the append to `favourites.jsonl` is the
-    /// caller's and cannot fail for a remote reason (§6.2).
+    /// caller's and cannot fail for a remote reason.
     fn toggle_favourite_mark(&mut self, id: &ItemId) {
         if self.favourites.remove(id) {
             if self.filter {
                 // It keeps its place and loses its `★`. Pressing `f` again
-                // restores it; leaving the filter drops it (§1.6).
+                // restores it; leaving the filter drops it.
                 self.sticky.insert(id.clone());
                 self.status = Some(
                     "unfavourited — still shown until you leave the favourites view".into(),
@@ -1488,14 +1399,14 @@ impl Gallery {
                 "★ favourited — private to you; nothing is announced.".to_string()
             });
         }
+        self.recompute_view();
     }
 }
 
 // ── drawing helpers ──────────────────────────────────────────────────
 
 /// A dim field of `glyph`, with `centre` in the middle where there is one. The
-/// three placeholder states differ by their centred glyph, which is legible on
-/// every rung and does not depend on colour (§2.4).
+/// placeholder states differ by that glyph, which needs no colour to read.
 fn field(w: u16, h: u16, glyph: char, centre: Option<char>) -> Paragraph<'static> {
     let mid_row = h / 2;
     let mid_col = (w / 2) as usize;
@@ -1895,14 +1806,14 @@ mod tests {
         let selected = g.selected().cloned();
         g.handle_key(press('f')); // unfavourite it
         assert_eq!(g.selected().cloned(), selected, "it keeps its place");
-        assert_eq!(g.view().len(), 1, "and stays shown");
+        assert_eq!(g.view.len(), 1, "and stays shown");
         let said = g.take_status().unwrap_or_default();
         assert!(said.contains("still shown until you leave"), "{said}");
 
         // Re-entering the filter drops it.
         g.handle_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT));
         g.handle_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT));
-        assert_eq!(g.view().len(), 0);
+        assert_eq!(g.view.len(), 0);
     }
 
     #[test]

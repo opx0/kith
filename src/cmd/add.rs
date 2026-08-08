@@ -1,33 +1,21 @@
-//! `kith add <PATH>…` — walkthrough steps 5 and 12, and the only way bytes
-//! become Items in v0.1.
+//! `kith add <PATH>…` — the only way bytes become Items in v0.1.
 //!
 //! The module owns one question: *what should enter this Collection, and what
 //! should be refused.* Everything it writes is one `add` record per accepted
-//! candidate; the Sidecar every surface renders is what the reduction makes of
-//! those records (ADR-0004 §4), so nothing here writes a Sidecar and nothing
-//! here writes a file the Sync Engine's own scanner would have to guess about.
+//! candidate. Four decisions hold the flow up:
 //!
-//! Four decisions from `docs/spec/collections.md` §3 hold the flow up, and each
-//! is a consequence of something already locked:
-//!
-//! * **Copy, never move.** The source is the Person's own library and predates
-//!   kith; rearranging it is not an import's job. A bad `kith add` is undone by
-//!   removing Items, and a bad move is undone by nothing (§3.1).
+//! * **Copy, never move.** A bad `kith add` is undone by removing Items; a bad
+//!   move is undone by nothing.
 //! * **Register in place** when the path is already inside the Circle root — no
-//!   copy, no rename, no byte movement. That is how an existing tree's bytes
-//!   become Items without the tree being touched (§3.1, §4.4).
-//! * **The Provider is the gate.** Content the Collection's Provider does not
-//!   `claim` is refused with a message, never silently accepted (ADR-0003 §1).
-//!   The core knows People, Circles and Items; it does not know what a wallpaper
-//!   is, and it does not get to overrule the layer that does.
-//! * **Bytes before record.** Bytes are staged, verified, published, and only
-//!   then recorded (ADR-0004 §3). A crash in the window leaves a file with no
-//!   record — an orphan the next reconcile adopts — never a record advertising
-//!   bytes that were never staged.
+//!   copy, no rename, no byte movement.
+//! * **The Provider is the gate.** Content it does not `claim` is refused with a
+//!   message, never silently accepted.
+//! * **Bytes before record.** Staged, verified, published, then recorded: a crash
+//!   in the window leaves an orphan the next reconcile adopts, never a record
+//!   advertising bytes that were never staged.
 //!
 //! Import never talks to the Sync Engine. The engine is consulted once, before
-//! any of this, for the two facts that are genuinely its own: where this
-//! Device's Circles are, and what this Device's identity is.
+//! any of this, for where this Device's Circles are and what its identity is.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -44,7 +32,7 @@ use crate::store::records::{self, Record};
 use crate::store::descriptors;
 use crate::{config, hash, identity};
 
-// Sysexits, so the whole binary speaks one dialect (cli-tui §3.1).
+// Sysexits, so the whole binary speaks one dialect.
 const EX_OK: i32 = 0;
 const EX_FAIL: i32 = 1;
 const EX_USAGE: i32 = 64;
@@ -52,35 +40,32 @@ const EX_DATA: i32 = 65;
 const EX_UNAVAILABLE: i32 = 69;
 const EX_INTERNAL: i32 = 70;
 
-/// v0.1's sole Collection id. A literal in exactly one place per Collection
-/// (collections §8); everywhere else the id is an opaque string.
+/// v0.1's sole Collection id; everywhere else the id is an opaque string.
 const MAIN: &str = "main";
 
-/// The one Provider this build registers (ADR-0003 §1).
+/// The one Provider this build registers.
 const WALLPAPER: &str = "wallpaper";
 
-/// How much of a candidate is read to guess its type before the Provider is
-/// asked. 8 KiB rather than 512 B because a text-shaped format's prologue and
-/// comments can push its root element past a small window (collections §3.2).
+/// How much of a candidate is read to guess its type. 8 KiB rather than 512 B
+/// because a text-shaped format's prologue can push its root element past a
+/// smaller window.
 const SNIFF_LEN: usize = 8 * 1024;
 
-/// Copy buffer. Matches the hasher's, so a copy costs one read and one write per
-/// megabyte and nothing peaks at the size of the largest Item.
+/// Copy buffer, matching the hasher's.
 const COPY_BUF: usize = 1024 * 1024;
 
-/// Above either of these a plan is confirmed rather than run (collections §9).
+/// Above either of these a plan is confirmed rather than run.
 const CONFIRM_ITEMS: usize = 500;
 const CONFIRM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Headroom left on the filesystem after an import. A Collection that fills its
-/// own disk takes the Person's session down with it.
+/// Headroom left on the filesystem: a Collection that fills its own disk takes
+/// the Person's session down with it.
 const SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
-/// Staged bytes older than this are litter from a crashed run, not state
-/// (ADR-0004 §7: nothing under `.kith/local` is authoritative).
+/// Staged bytes older than this are litter from a crashed run, not state.
 const STAGING_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How often the run narrates itself on stderr (collections §3.3).
+/// How often the run narrates itself on stderr.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// ENOSPC. Named by number because the portable spelling of "the disk is full"
@@ -89,11 +74,9 @@ const ENOSPC: i32 = 28;
 
 /// Import the named paths into the active Circle's Collection.
 ///
-/// Returns this process's exit code, which is the **worst** outcome of the run:
-/// a candidate the Provider refused or could not read makes it 65, an I/O
-/// failure mid-copy makes it 1, and everything else is 0. `--dry-run`,
-/// `--move`, `--circle` and `--yes` are not in this build's signature; where
-/// their absence changes a decision it is called out at the point it is made.
+/// Returns the worst outcome of the run: 65 for a candidate refused or unread, 1
+/// for an I/O failure mid-copy, 0 otherwise. `--dry-run`, `--move`, `--circle`
+/// and `--yes` are not in this build's signature.
 pub async fn run(paths: &[String]) -> i32 {
     if paths.is_empty() {
         eprintln!("kith add <PATH>… — the wallpapers to bring into this Circle");
@@ -106,10 +89,8 @@ pub async fn run(paths: &[String]) -> i32 {
     };
     let sources: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
 
-    // The Provider seam is synchronous by design and the whole import is
-    // blocking work — hashing, copying, `fdatasync`. ADR-0003's rule is that the
-    // core runs Provider calls on `spawn_blocking`; running the entire import
-    // there honours it in one place instead of at every call site.
+    // The Provider seam is synchronous and the whole import is blocking work, so
+    // the import runs on `spawn_blocking` in one place rather than per call site.
     match tokio::task::spawn_blocking(move || import(&job, &sources)).await {
         Ok(code) => code,
         Err(e) => {
@@ -123,21 +104,19 @@ pub async fn run(paths: &[String]) -> i32 {
 
 /// Everything the import needs, resolved once and never re-consulted.
 struct Job {
-    /// The Circle root, which in v0.1 is also the Collection root: the sole
-    /// Collection's descriptor `root` is `"."` (ADR-0004 §2).
+    /// The Circle root, which in v0.1 is also the Collection root.
     root: PathBuf,
     circle_name: String,
     collection: String,
     provider: Box<dyn Provider>,
-    /// The writing Device — the log's filename, and the whole of W1.
+    /// The writing Device — the log's filename.
     device: String,
     /// The Person every record is attributed to. Asserted, never proven.
     person: PersonId,
-    /// Every *other* Circle root this Device holds. Excluded from recursion so
+    /// Every *other* Circle root this Device holds, excluded from recursion so
     /// `kith add ~/Pictures` cannot swallow a Circle that lives inside it.
     other_roots: Vec<PathBuf>,
-    /// The globs the Sync Engine owns inside a Circle root. Consumed as data;
-    /// no engine spelling is written down above the seam (ADR-0002 §1).
+    /// The globs the Sync Engine owns inside a Circle root, consumed as data.
     reserved: Vec<&'static str>,
     /// Whether this run may ask a Person a question.
     interactive: bool,
@@ -145,13 +124,9 @@ struct Job {
 
 /// Resolve the Identity, the Device, the Circle and its Collection.
 ///
-/// *Honesty note, and a real limit of this build.* collections §"Edge cases"
-/// promises `kith add` works with the Sync Engine down, and the import itself
-/// does — it touches nothing but the tree. What still needs the engine here is
-/// *finding* the tree: this Device's Circle roots and its own Device id are
-/// engine facts, and ADR-0004 §9's cache, which is where a later build reads
-/// them from without asking, does not exist yet. So an unreachable engine is
-/// reported as exactly what it is rather than papered over.
+/// The import itself needs no engine, but *finding* the tree does: this Device's
+/// Circle roots and its own Device id are engine facts and nothing caches them
+/// yet, so an unreachable engine is reported rather than papered over.
 async fn resolve() -> Result<Job, i32> {
     let identity = match identity::load() {
         Ok(Some(id)) => id,
@@ -183,9 +158,8 @@ async fn resolve() -> Result<Job, i32> {
         EX_UNAVAILABLE
     })?;
 
-    // cli-tui §1.3: `--circle` if given, else the sole Circle, else refuse. The
-    // CLI never guesses from history — a command's meaning has to be readable
-    // from its own text, and `--circle` is not in this build's signature.
+    // The sole Circle, else refuse: the CLI never guesses from history, and
+    // `--circle` is not in this build's signature.
     let chosen = match circles.len() {
         1 => circles[0].clone(),
         0 => {
@@ -203,10 +177,8 @@ async fn resolve() -> Result<Job, i32> {
     };
     let root = chosen.root.clone();
 
-    // The Collection's Provider comes off the descriptor. An adopted Circle
-    // whose Steward's Device has not run kith yet has no descriptor at all
-    // (collections §4.3): the Collection still works, so the v0.1 literals
-    // stand in and the gap is said out loud rather than treated as a fault.
+    // An adopted Circle whose Steward's Device has not run kith yet has no
+    // descriptor: the v0.1 literals stand in and the gap is said out loud.
     let descriptor = match descriptors::read_collections(&root) {
         Ok(found) => found,
         Err(e) => {
@@ -224,7 +196,7 @@ async fn resolve() -> Result<Job, i32> {
         }
         1 => Some(descriptor.into_iter().next().expect("exactly one")),
         n => {
-            // Forward compatibility: degraded, never broken (collections §8).
+            // Forward compatibility: degraded, never broken.
             let pick = descriptor
                 .iter()
                 .find(|d| d.collection == MAIN)
@@ -285,18 +257,16 @@ fn label(name: &str, id: &str) -> String {
 // ── the plan ─────────────────────────────────────────────────────────
 
 /// What a candidate turns out to be. The plan writes nothing, so every verdict
-/// is reached before a single byte moves (collections §3.2).
+/// is reached before a single byte moves.
 enum Verdict {
     /// Copy into `dest`, then record.
     Import { item: ItemId, dest: String, revives: bool },
     /// Already inside the Collection root, or byte-identical to a file that is:
-    /// record only, no copy, no rename (collections §3.1).
+    /// record only, no copy, no rename.
     Register { item: ItemId, dest: String, revives: bool },
-    /// A live Item already has these bytes. Skipped, and the exit code is
-    /// unaffected — adding what is already there is not an error.
+    /// A live Item already has these bytes. Skipped, and never an error.
     Duplicate,
-    /// The Provider does not claim it. Refused with a reason, never silently
-    /// accepted (ADR-0003 §1).
+    /// The Provider does not claim it. Refused with a reason.
     Unclaimed { reason: String },
     /// Vanished mid-walk, unreadable, or not nameable.
     Unreadable { error: String },
@@ -320,7 +290,7 @@ struct Plan {
 struct Found {
     path: PathBuf,
     /// Directory segments below a directory argument, preserved as given. A file
-    /// argument lands at the Collection root and has none (collections §3.2).
+    /// argument lands at the Collection root and has none.
     dirs: Vec<String>,
     name: String,
 }
@@ -331,10 +301,8 @@ fn import(job: &Job, sources: &[PathBuf]) -> i32 {
 
     let plan = plan(job, sources);
 
-    // The confirmation gate. `--yes` is not in this build's signature, so a
-    // large plan on a non-terminal is refused with its numbers rather than
-    // imported unasked — collections §9's rule, minus the escape hatch, which
-    // lands with the flag.
+    // `--yes` is not in this build's signature, so a large plan on a non-terminal
+    // is refused with its numbers rather than imported unasked.
     let big = plan.import_count > CONFIRM_ITEMS || plan.import_bytes > CONFIRM_BYTES;
     if big {
         let question = format!(
@@ -371,12 +339,9 @@ fn import(job: &Job, sources: &[PathBuf]) -> i32 {
     render(job, &report)
 }
 
-/// Whether a plan fits, given what the filesystem says it has.
-///
-/// A margin is always left: a Collection that fills its own disk takes the
-/// Person's session down with it, and the bytes it was importing are the least
-/// of what breaks. `None` — a filesystem this build cannot ask — fits, because
-/// a failed copy is cleaned up and a refusal nobody can explain is not.
+/// Whether a plan fits, given what the filesystem says it has. A margin is always
+/// left, and a filesystem this build cannot ask (`None`) fits: a failed copy is
+/// cleaned up, a refusal nobody can explain is not.
 fn fits(need: u64, free: Option<u64>) -> bool {
     match free {
         Some(free) => need.saturating_add(SPACE_MARGIN) <= free,
@@ -389,9 +354,8 @@ fn plan(job: &Job, sources: &[PathBuf]) -> Plan {
     let mut entries = Vec::new();
     collect(job, sources, &mut found, &mut entries);
 
-    // What is already here. Dedup is against **live** Items only, so bytes
-    // matching a tombstoned Item are imported and ADR-0004 §4.4's revival rule
-    // brings the original Item back with its original attribution.
+    // Dedup is against **live** Items only, so bytes matching a tombstoned Item
+    // are imported and the revival rule brings the original Item back.
     let records = records::read_all(&job.root, &job.collection).unwrap_or_default();
     let live: BTreeSet<String> = records::derive_items(&records, &job.root)
         .into_iter()
@@ -407,8 +371,7 @@ fn plan(job: &Job, sources: &[PathBuf]) -> Plan {
         }
     }
 
-    // Hashes already spoken for by this run: two arguments naming one image is
-    // one Item, not two.
+    // Two arguments naming one image is one Item, not two.
     let mut claimed_here: BTreeSet<String> = BTreeSet::new();
     // Destinations already spoken for, and what the root already holds.
     let mut placer = Placer::default();
@@ -452,8 +415,7 @@ fn judge(
     };
 
     // The Provider gate, first and cheaply: a bounded prefix, a MIME guess, and
-    // the Provider's own answer. Nothing kith knows about wallpapers is applied
-    // here, because kith knows nothing about wallpapers.
+    // the Provider's own answer.
     let mime = sniff(&prefix(&source));
     let claims = job.provider.claims(&ImportCandidate {
         path: &source,
@@ -472,8 +434,7 @@ fn judge(
         };
     }
 
-    // The only full read of the source in the whole import (collections §3.2
-    // step 4). The copy phase re-reads and verifies against this digest.
+    // The only full read of the source; the copy phase verifies against this.
     let digest = match hash::hash_file(&source) {
         Ok(h) => h,
         Err(e) => return unreadable(source, e.to_string()),
@@ -485,8 +446,7 @@ fn judge(
     let revives = retired.contains(digest.as_str());
     claimed_here.insert(digest.clone());
 
-    // Already inside the Collection root: register in place. No copy, no rename,
-    // no byte movement — this is how an existing tree becomes Items.
+    // Already inside the Collection root: register in place, no byte movement.
     if let Some(rel) = relative_to(&job.root, &source) {
         placer.reserve(&rel);
         return Entry {
@@ -504,9 +464,8 @@ fn judge(
         Placement::Free(dest) => {
             Entry { source, size, hash: digest, verdict: Verdict::Import { item, dest, revives } }
         }
-        // The bytes are already in the Collection under that name, but no live
-        // Item claims them: an orphan the reconcile would have adopted anyway.
-        // Recording it is cheaper and more honest than copying it beside itself.
+        // An orphan the reconcile would have adopted anyway: recording it beats
+        // copying it beside itself.
         Placement::SameBytes(dest) => {
             Entry { source, size, hash: digest, verdict: Verdict::Register { item, dest, revives } }
         }
@@ -523,9 +482,8 @@ fn unreadable(source: PathBuf, error: String) -> Entry {
 /// Expand the arguments into candidates, depth-first and in a stable order.
 fn collect(job: &Job, sources: &[PathBuf], out: &mut Vec<Found>, refused: &mut Vec<Entry>) {
     for source in sources {
-        // A symlink *argument* imports its target's bytes as an ordinary copy
-        // and leaves the link alone (collections §"Edge cases"). A symlink found
-        // during recursion is skipped: kith does not sync links.
+        // A symlink *argument* imports its target's bytes and leaves the link
+        // alone; one found during recursion is skipped. kith does not sync links.
         let meta = match fs::metadata(source) {
             Ok(m) => m,
             Err(e) => {
@@ -537,8 +495,7 @@ fn collect(job: &Job, sources: &[PathBuf], out: &mut Vec<Found>, refused: &mut V
         if meta.is_dir() {
             // A directory named as an argument is walked even when it is the
             // Collection root: that argument *is* the register-in-place request.
-            // The exclusion below applies to what recursion finds, which is what
-            // keeps `kith add ~/Pictures` from swallowing a Circle inside it.
+            // The exclusion below applies only to what recursion finds.
             walk(job, source, &mut Vec::new(), out, refused);
         } else if meta.is_file() {
             match source.file_name().and_then(|n| n.to_str()) {
@@ -576,8 +533,7 @@ fn walk(job: &Job, dir: &Path, prefix: &mut Vec<String>, out: &mut Vec<Found>, r
     names.sort();
 
     for name in names {
-        // Dot-entries at any depth, silently. `.kith/` is in here, and so is
-        // every engine artefact whose name begins with a dot.
+        // Dot-entries at any depth: `.kith/` and every dot-named engine artefact.
         if name.starts_with('.') {
             continue;
         }
@@ -596,8 +552,7 @@ fn walk(job: &Job, dir: &Path, prefix: &mut Vec<String>, out: &mut Vec<Found>, r
         }
 
         if meta.is_dir() {
-            // Never eat your own tail: the Collection root and every other
-            // Circle root this Device holds are excluded from recursion.
+            // Never eat your own tail.
             let here = canonical(&path);
             if here == canonical(&job.root) || job.other_roots.contains(&here) {
                 continue;
@@ -611,11 +566,9 @@ fn walk(job: &Job, dir: &Path, prefix: &mut Vec<String>, out: &mut Vec<Found>, r
     }
 }
 
-/// Whether an entry name is one the Sync Engine owns.
-///
-/// The globs arrive from `SyncEngine::reserved_paths()` and are matched as data.
-/// A glob naming a directory's contents (`x/**`) is matched against the
-/// directory itself, which is what stops the walk one level earlier.
+/// Whether an entry name is one the Sync Engine owns. A glob naming a directory's
+/// contents (`x/**`) is matched against the directory itself, which is what stops
+/// the walk one level earlier.
 fn is_reserved(job: &Job, name: &str) -> bool {
     job.reserved.iter().any(|glob| {
         let head = glob.split('/').next().unwrap_or(glob);
@@ -663,11 +616,10 @@ enum Placement {
 
 /// Chooses destinations, and remembers what the Collection root already holds.
 ///
-/// The index is what makes the comparison **case-insensitive** rather than
-/// merely `exists()`-shaped: on a case-sensitive filesystem `sunset.png` does
-/// not exist beside `Sunset.png`, and creating the pair would hand every Member
-/// on a case-insensitive filesystem two files they cannot both hold. Listing
-/// each directory once also keeps a large import linear instead of quadratic.
+/// The index makes the comparison **case-insensitive** rather than merely
+/// `exists()`-shaped: `sunset.png` beside `Sunset.png` is a pair no Member on a
+/// case-insensitive filesystem can hold. Listing each directory once also keeps a
+/// large import linear.
 #[derive(Default)]
 struct Placer {
     /// Lowercased relative path → the relative path as it is actually spelled.
@@ -698,11 +650,8 @@ impl Placer {
         }
     }
 
-    /// Reserve a relative destination, suffixing on collision.
-    ///
-    /// Identical bytes under the wanted name are reported rather than
-    /// duplicated; different bytes get `sunset-2.png`, `sunset-3.png`, and so
-    /// on, with the incumbent keeping the name it already had.
+    /// Reserve a relative destination, suffixing on collision. Identical bytes are
+    /// reported rather than duplicated, and the incumbent keeps its own name.
     fn claim(&mut self, root: &Path, dir: &str, name: &str, digest: &str) -> Placement {
         self.ensure(root, dir);
         let (stem, ext) = split_extension(name);
@@ -753,25 +702,18 @@ impl Placer {
     }
 }
 
-/// Make a filename kith is willing to write, in the order collections §3.2
-/// step 6 fixes.
+/// Make a filename kith is willing to write.
 ///
-/// *Gap noted:* the spec also asks for NFC normalisation. No normalisation crate
-/// is in this build's dependencies and Cargo.toml is not this module's to
-/// change, so names are carried as the Person wrote them and the collision
-/// compare uses Unicode lowercasing alone. Two names differing only by
-/// composition would land as two files rather than one collision — visible in
-/// the Gallery, harmless to the records, and one crate away from fixed.
+/// No NFC normalisation: no crate for it is in this build, so two names differing
+/// only by composition land as two files rather than as one collision.
 fn sanitise(name: &str, fallback_stem: &str) -> String {
     let cleaned: String = name
         .chars()
-        // Separators and NUL cannot appear in a single path component, and a
-        // control character in a filename is a display attack waiting for a
-        // terminal to render it.
+        // Separators and NUL cannot appear in one path component, and a control
+        // character in a filename is a display attack.
         .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
         .collect();
-    // A sanitised name must not *become* hidden: dot-entries are skipped, so a
-    // name that arrived visible has to stay visible.
+    // A sanitised name must not *become* hidden: dot-entries are skipped.
     let cleaned = cleaned.trim_start_matches('.').trim().to_string();
 
     let cleaned = if cleaned.is_empty() {
@@ -782,9 +724,8 @@ fn sanitise(name: &str, fallback_stem: &str) -> String {
     truncate_name(&cleaned, 255)
 }
 
-/// 255 bytes is the filename limit on every filesystem kith targets. The
-/// extension is preserved, because it is what a Person and half the world's
-/// tooling use to recognise the content.
+/// 255 bytes is the filename limit on every filesystem kith targets; the
+/// extension is preserved.
 fn truncate_name(name: &str, limit: usize) -> String {
     if name.len() <= limit {
         return name.to_string();
@@ -848,11 +789,8 @@ fn prefix(path: &Path) -> Vec<u8> {
 
 /// A MIME guess from magic bytes, handed to the Provider as a hint.
 ///
-/// Magic numbers only, deliberately. A format whose signature is text — an
-/// XML-shaped one, say — has no magic bytes to find, and guessing at one here
-/// would be the core deciding what a Provider claims. The Provider's own
-/// extension match is the answer for those, and `claims` is the gate either way
-/// (ADR-0003 §1).
+/// Magic numbers only: guessing at a text-shaped format would be the core
+/// deciding what a Provider claims. `claims` is the gate either way.
 fn sniff(prefix: &[u8]) -> Option<String> {
     const MAGIC: &[(&[u8], &str)] = &[
         (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -953,12 +891,9 @@ enum Halt {
 
 /// Register bytes that are already in the Collection root. Nothing is copied.
 ///
-/// `at` is the file's own modification time rather than now. That is ADR-0004
-/// §4.5's rule and it is load-bearing: the engine preserves mtimes, so two
-/// Devices registering the same pre-existing tree write records with identical
-/// `at`, and the alias tie-break reduces to the Device id — both converge on one
-/// Item without talking. It is also the honest date: these bytes were not added
-/// today, they were found today.
+/// `at` is the file's own mtime rather than now, and that is load-bearing: the
+/// engine preserves mtimes, so two Devices registering the same pre-existing tree
+/// write identical `at` and converge on one Item without talking.
 fn record_in_place(
     job: &Job,
     entry: &Entry,
@@ -981,7 +916,7 @@ fn record_in_place(
     Ok(())
 }
 
-/// Stage, verify, publish, record — in that order, always (ADR-0004 §3).
+/// Stage, verify, publish, record — in that order, always.
 fn copy_then_record(
     job: &Job,
     entry: &Entry,
@@ -1013,9 +948,8 @@ fn copy_then_record(
         return Err(Halt::Entry("source changed during import".into()));
     }
 
-    // 3. Publish. The staging area is on the same filesystem as the root by
-    //    construction, so this is one atomic rename and never a half-copy that
-    //    replicates.
+    // 3. Publish. Staging is on the same filesystem as the root by construction,
+    //    so this is one atomic rename, never a half-copy that replicates.
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| fatal_or_entry(&e, &job.root, e.to_string()))?;
     }
@@ -1027,9 +961,8 @@ fn copy_then_record(
         let _ = fs::File::open(parent).and_then(|d| d.sync_all());
     }
 
-    // 4. Record. Bytes are in the tree before this line runs, so a crash here
-    //    leaves an orphan the next reconcile adopts — never a record for bytes
-    //    that were never staged.
+    // 4. Record. Bytes are in the tree first, so a crash here leaves an orphan
+    //    the next reconcile adopts, never a record for bytes nobody has.
     facts(job, &full, dest, report);
     append(job, item, dest, &entry.hash, entry.size, &now())
         .map_err(|e| Halt::Entry(e.to_string()))?;
@@ -1049,8 +982,7 @@ fn copy_then_record(
 fn stage(source: &Path, staged: &Path) -> io::Result<String> {
     let mut input = fs::File::open(source)?;
     let mut output = fs::File::create(staged)?;
-    // A wallpaper is not a program, and the engine replicates the executable
-    // bit. kith clears it rather than propagating it to every Member.
+    // The engine replicates the executable bit, and a wallpaper is not a program.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1076,15 +1008,9 @@ fn stage(source: &Path, staged: &Path) -> io::Result<String> {
 
 /// Ask the Provider what it can read out of the content.
 ///
-/// Extraction failure is **not** an import failure (collections §3.3): a
-/// wallpaper whose dimensions could not be read still belongs in the Collection.
-///
-/// *Gap noted, and it is a real one.* ADR-0004 §4.2 puts these facts in the `add`
-/// record's `facts` field; the record shape this build fixes has no such field
-/// — `store::records` reserves it, unwritten. So the facts are read, shown in
-/// this run's narration, and not yet persisted. Preview and `kith list items`
-/// will render dimensions from the record once the field lands; nothing about
-/// the format has to change for that, which is the point of reserving it.
+/// Extraction failure is **not** an import failure: a wallpaper whose dimensions
+/// could not be read still belongs in the Collection. The facts are narrated and
+/// not persisted — the record's `facts` field is reserved and unwritten here.
 fn facts(job: &Job, bytes_at: &Path, dest: &str, report: &mut Report) {
     let candidate = ImportCandidate { path: bytes_at, mime: None };
     match job.provider.extract_metadata(&candidate) {
@@ -1099,15 +1025,9 @@ fn facts(job: &Job, bytes_at: &Path, dest: &str, report: &mut Report) {
 
 /// Append one `add` record to this Device's log.
 ///
-/// *Durability, and the one place this build differs from collections §3.3.*
-/// The spec batches the flush — one `fdatasync` per 64 records or 250 ms — by
-/// holding the log's lock for the whole run. `store::records::append` is this
-/// binary's only writer of `.kith/items/**` (collections §1.3) and its fixed
-/// contract flushes per record, so a 5 000-file import pays 5 000 flushes here.
-/// Duplicating the append protocol in a command module to get the batch would
-/// put a second writer on the log, which is the one thing ADR-0004's spine
-/// forbids; the batch belongs behind a run-scoped writer in `store::records`,
-/// and this is the single call site that would move to it.
+/// `store::records::append` flushes per record, so a 5 000-file import pays 5 000
+/// flushes. Batching belongs behind a run-scoped writer in `store::records`, never
+/// behind a second writer of the log here.
 fn append(
     job: &Job,
     item: &ItemId,
@@ -1116,8 +1036,7 @@ fn append(
     size: u64,
     at: &str,
 ) -> io::Result<()> {
-    // The destination filename's stem, verbatim. `IMG_2031.JPG` titles as
-    // `IMG_2031`: prettifying is a guess, and the stem is what the Person chose.
+    // The destination filename's stem, verbatim: prettifying is a guess.
     let name = dest.rsplit('/').next().unwrap_or(dest);
     let title = split_extension(name).0.to_string();
 
@@ -1137,10 +1056,8 @@ fn append(
     )
 }
 
-/// A full filesystem ends the run; every subsequent copy would fail the same
-/// way, and four hundred identical error lines help nobody. Items already
-/// imported keep their records and their bytes, and re-running resumes —
-/// everything already here reads as a duplicate.
+/// A full filesystem ends the run: every subsequent copy would fail the same way.
+/// Items already imported keep their records, and re-running resumes.
 fn fatal_or_entry(e: &io::Error, root: &Path, message: String) -> Halt {
     if e.raw_os_error() == Some(ENOSPC) {
         let free = free_bytes(root).map(bytes).unwrap_or_else(|| "no".into());
@@ -1164,8 +1081,7 @@ fn progress(narrate: bool, last: &mut Instant, done: usize, total: usize, curren
     let _ = io::stderr().flush();
 }
 
-/// stdout carries the result; stderr carries everything that explains it
-/// (cli-tui §1.5), so `kith add … | …` stays parseable.
+/// stdout carries the result; stderr carries everything that explains it.
 fn render(job: &Job, report: &Report) -> i32 {
     let imported = report.added + report.registered;
     let skipped = report.duplicates + report.unclaimed.len() + report.unreadable.len();
@@ -1216,8 +1132,6 @@ fn render(job: &Job, report: &Report) -> i32 {
     }
 
     if imported > 0 {
-        // The honesty the design demands, at the moment it is earned: adding is
-        // not applying. Nobody's screen changes because content arrived.
         eprintln!(
             "They sync to every Member of {}; nobody's screen changes until they choose Apply.",
             job.circle_name
@@ -1251,8 +1165,7 @@ fn confirm(question: &str) -> bool {
 // ── small facts about the filesystem ─────────────────────────────────
 
 fn staging_dir(root: &Path) -> PathBuf {
-    // `.kith/local` never syncs and is `(?d)`-marked, so nothing here is ever
-    // authoritative (ADR-0004 §7) — which is exactly why staging lives in it.
+    // `.kith/local` never syncs, which is exactly why staging lives in it.
     descriptors::kith_dir(root).join("local").join("incoming")
 }
 
@@ -1288,8 +1201,7 @@ fn file_name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// Decimal, because that is what a Person reads on a disk label and what the
-/// spec's own examples print.
+/// Decimal, because that is what a Person reads on a disk label.
 fn bytes(n: u64) -> String {
     const UNITS: [(&str, u64); 4] = [("GB", 1_000_000_000), ("MB", 1_000_000), ("kB", 1_000), ("B", 1)];
     for (unit, scale) in UNITS {
@@ -1300,15 +1212,12 @@ fn bytes(n: u64) -> String {
     format!("{n} B")
 }
 
-/// Free space on the filesystem holding `path`, or `None` when this build
-/// cannot ask.
+/// Free space on the filesystem holding `path`, or `None` when this build cannot
+/// ask.
 ///
-/// One libc symbol, declared here rather than pulled in as a dependency, the
-/// same way `store::records` declares `flock`. Where the layout of the answer is
-/// not known for certain — anything but 64-bit Linux, which is what v0.1 ships
-/// on — the answer is `None` and the pre-flight is skipped rather than guessed
-/// at. A skipped pre-flight costs a failed copy that is cleaned up; a guessed
-/// one costs a refusal nobody can explain.
+/// One libc symbol, declared here rather than pulled in as a dependency. Off
+/// 64-bit Linux the struct layout is not known for certain, so the answer is
+/// `None` and the pre-flight is skipped rather than guessed at.
 #[cfg(all(unix, target_os = "linux", target_pointer_width = "64"))]
 fn free_bytes(path: &Path) -> Option<u64> {
     use std::ffi::{CString, c_char};
@@ -1360,8 +1269,7 @@ mod tests {
     const ANA_DEVICE: &str = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2";
     static NEXT: AtomicU32 = AtomicU32::new(0);
 
-    /// A scratch tree under the system temp directory — never the Person's home,
-    /// which holds the one file kith cannot rebuild.
+    /// A scratch tree under the system temp directory, never the Person's home.
     fn scratch(label: &str) -> PathBuf {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("kith-add-{}-{n}-{label}", std::process::id()));
@@ -1390,8 +1298,7 @@ mod tests {
         }
     }
 
-    /// A real image, so the Provider's own claim and metadata paths run rather
-    /// than being stubbed around.
+    /// A real image, so the Provider's own claim and metadata paths run.
     fn wallpaper(path: &Path, w: u32, h: u32) {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).unwrap();
@@ -1485,7 +1392,7 @@ mod tests {
         wallpaper(&home.join("sunset.png"), 4, 4);
 
         assert_eq!(import(&job, &[home.join("sunset.png")]), EX_OK);
-        // A duplicate does not affect the exit code (cli-tui §4.6).
+        // A duplicate does not affect the exit code.
         assert_eq!(import(&job, &[home.join("sunset.png")]), EX_OK);
 
         assert_eq!(items(&job).len(), 1);
@@ -1505,8 +1412,6 @@ mod tests {
         assert_eq!(items(&job).len(), 1);
     }
 
-    /// Dedup is against **live** Items only, so a tombstoned Item's bytes come
-    /// back — and ADR-0004 §4.4's revival rule restores the original adder.
     #[test]
     fn re_adding_bytes_whose_item_was_removed_revives_the_original_item() {
         let home = scratch("revive-home");
@@ -1575,8 +1480,7 @@ mod tests {
             "no second copy beside the original"
         );
 
-        // Adoption dates an Item from its bytes, not from the moment of
-        // discovery — which is also what makes two Devices converge.
+        // An adopted Item is dated from its bytes, not from discovery.
         let recorded = &records::read_all(&root, MAIN).unwrap()[0];
         assert_eq!(recorded.at(), mtime_of(&root.join("nature/forest.png")).unwrap());
     }
@@ -1612,8 +1516,6 @@ mod tests {
         wallpaper(&root.join("already-mine.png"), 5, 5);
         wallpaper(&other.join("someone-elses.png"), 6, 6);
 
-        // `kith add ~/Pictures` with a Circle inside it: without this rule the
-        // single command doubles the Collection.
         assert_eq!(import(&job, &[home.clone()]), EX_OK);
 
         let titles: BTreeSet<String> = items(&job).into_iter().map(|i| i.title).collect();
@@ -1700,7 +1602,7 @@ mod tests {
 
     #[test]
     fn an_import_that_would_not_fit_is_refused_and_a_margin_is_always_left() {
-        // collections §"Edge cases": 5.1 GB wanted, 2.3 GB free, nothing copied.
+        // 5.1 GB wanted, 2.3 GB free, nothing copied.
         assert!(!fits(5_100_000_000, Some(2_300_000_000)));
         assert!(fits(1_000, Some(1_000_000_000)));
         assert!(
@@ -1801,8 +1703,7 @@ mod tests {
         assert_eq!(sniff(b"\xFF\xD8\xFFrest").as_deref(), Some("image/jpeg"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 ").as_deref(), Some("image/webp"));
         assert_eq!(sniff(b"RIFF\0\0\0\0WAVEfmt "), None, "a RIFF is not an image");
-        // Text-shaped formats have no magic number; the Provider's extension
-        // match is the answer for those, and kith does not invent one.
+        // Text-shaped formats have no magic number, and kith invents none.
         assert_eq!(sniff(b"<?xml version=\"1.0\"?><svg"), None);
         assert_eq!(sniff(b""), None);
     }

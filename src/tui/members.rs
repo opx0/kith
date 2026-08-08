@@ -1,27 +1,13 @@
-//! The Members screen and the pending-join prompt — walkthrough step 8.
+//! The Members screen and the pending-join prompt.
 //!
-//! Two surfaces live here, and both are bounded by what kith can honestly know.
+//! The screen lists the People in a Circle with their Role and their Presence,
+//! where Presence is this Device's own live view of one connection — never
+//! "online" — and a Role is an agreement rather than an enforcement. Both
+//! caveats are permanent footers.
 //!
-//! The **Members screen** lists the People in a Circle with their Role and their
-//! Presence. Presence is one Device's own live view of one connection — it is
-//! `connected`, `not connected` or `unknown`, never "online", because "online"
-//! implies a human at a keyboard and a socket is all kith has (CONTEXT). A
-//! Member this Device cannot reach may be connected to another Member, and the
-//! footer says so on screen rather than in a manual.
-//!
-//! The Role column is honest in the copy itself: a Role is a policy, not an
-//! enforcement (circles spec §3.8). The caveat is a permanent footer, never a
-//! toggle and never scrolled away — honesty that can be dismissed is decoration.
-//!
-//! The **pending-join prompt** is the one real gate kith has (ADR-0002 §4):
-//! admission runs on the Steward's own Device. It is raised automatically when a
-//! Device knocks and stays pinned to this screen afterwards, because a Steward
-//! who pressed Esc needs somewhere to go back to. It shows the knocking Device's
-//! fingerprint grouped 4-4 for the out-of-band check, states the consequence of
-//! admitting inline, and never auto-dismisses.
-//!
-//! Nothing on this screen prints the transport's word for a Device: the word
-//! above the seam is Steward (circles spec §5.1).
+//! The pending-join prompt is the one real gate kith has: it is raised when a
+//! Device knocks, shows the fingerprint grouped 4-4 for the out-of-band check,
+//! states the consequence of admitting inline, and never auto-dismisses.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -33,27 +19,19 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::domain::{PersonId, Presence, Role};
 use crate::engine::{DeviceId, JoinRequest};
 
-// ── the copy this screen is required to carry ────────────────────────
-//
-// Named strings from circles spec §3.8.3 and cli-tui spec §7.2. Wording
-// changes here are spec changes, so they are constants rather than format
-// strings scattered through the render.
-
 /// `roles.footer` — always visible on the Members screen, never collapsed.
 pub const ROLES_FOOTER: &str = "Roles are an agreement, not a lock. Any Member can add or delete \
 anything here; every other Device keeps 30 days of previous versions if they do.";
 
-/// The one-line form, used when the screen is too short for the long one. It
-/// concedes the same thing in fewer words; it is never dropped entirely.
+/// The one-line form, used when the screen is too short for the long one.
 pub const ROLES_SHORT: &str =
     "Roles are agreements, not enforcement — admission is the only gate.";
 
-/// Presence is pairwise and live. Stated where the column is, not in a help page.
+/// Presence is pairwise and live, stated where the column is.
 pub const PRESENCE_FOOTER: &str = "Presence is this Device's own view, right now. Someone shown \
 as not connected may be connected to another Member.";
 
-/// `roles.badge` — next to the admin. Nothing more expansive, because there is
-/// nothing more.
+/// `roles.badge` — next to the admin.
 pub const ADMIN_BADGE: &str = "invites and approves";
 
 /// The consequence, stated inside the prompt where the key is pressed.
@@ -61,8 +39,6 @@ const ADMIT_CONSEQUENCE: &str = "Admitting adds this Device to {circle}. It rece
 and can add, change or delete Items — kith cannot prevent that, only restore. Approve People, \
 not Devices.";
 
-/// kith sees a Device, not a Person. The fingerprint is the only evidence either
-/// side has about who is on the other end.
 const IDENTIFY_BY_HAND: &str = "kith cannot tell you who this is. It sees a Device, not a Person. \
 Ask your friend to read you the fingerprint their kith printed, and approve only if it matches.";
 
@@ -70,57 +46,41 @@ const UNINVITED_WARNING: &str = "If this is not the Device your friend read to y
 admitting a stranger to every Item in this Circle — and nothing takes bytes back once they have \
 arrived.";
 
-// ── what the screen is given ─────────────────────────────────────────
-
-/// One Member of a Circle, as the caller derives them from the three sources
-/// circles spec §3.7 names: the Membership claims in the synced tree, the Circle
-/// descriptor, and the Sync Engine's view of which Devices are in the Circle.
-///
-/// This screen renders what it is handed and derives nothing about who is in the
-/// Circle — that is the store layer's job, and doing it twice would be two
-/// answers to one question.
+/// One Member of a Circle, as the caller derives them from the Membership
+/// claims, the Circle descriptor and the Sync Engine's view of the Circle.
 #[derive(Clone, Debug)]
 pub struct MemberView {
-    pub person: PersonId,
-    /// From the claim with the newest `asserted`. A Member exists because a
-    /// claim names them, so this is always present.
+    /// From the claim with the newest `asserted`.
     pub display_name: String,
-    /// Derived from `.kith/circle.toml`'s `founder_person`, never from a stored
-    /// Role — there is no roles record to read (circles spec §2.2).
+    /// Derived from the Circle's `founder_person`; there is no roles record.
     pub role: Role,
     pub presence: Presence,
-    /// Percent of what this Device knows that their Device holds. Bytes landing
-    /// is all it means; nothing here says anybody looked.
+    /// Percent of what this Device knows that their Device holds.
     pub in_sync: Option<u8>,
-    /// When a Device of theirs last wrote its Membership claim. Not a join date:
-    /// kith records none, so no column may be headed `JOINED`.
+    /// When a Device of theirs last wrote its Membership claim — not a join date.
     pub asserted: String,
     /// Set once every claim carrying this Person has it.
     pub left_at: Option<String>,
-    /// This Device's own Person. Presence renders `—`: kith holds no connection
-    /// to itself and will not pretend to.
+    /// This Device's own Person; Presence renders `—`.
     pub is_you: bool,
-    /// Their Device is the Circle's way in — `founder_device`, never the seam's
-    /// flag, which is invisible from the one Device certain to be the Steward's.
+    /// Their Device is the Circle's way in — `founder_device`.
     pub steward: bool,
     /// Whether the Sync Engine knows a Device of theirs to be in this Circle.
     pub in_circle: bool,
-    /// v0.1 holds exactly one; plural from day one so a second Device is one
-    /// more claim and no new column.
+    /// v0.1 holds exactly one; plural so a second Device is one more claim.
     pub devices: Vec<String>,
 }
 
 impl MemberView {
-    /// The four fields no Member row can render without. Everything else has an
-    /// honest default: no sync figure, no departure, not this Person.
+    /// The fields no Member row can render without; everything else has an
+    /// honest default.
     pub fn new(
-        person: PersonId,
+        _person: PersonId,
         display_name: impl Into<String>,
         role: Role,
         presence: Presence,
     ) -> Self {
         Self {
-            person,
             display_name: display_name.into(),
             role,
             presence,
@@ -135,17 +95,12 @@ impl MemberView {
     }
 }
 
-/// A Device in the Circle that no Membership claim names.
-///
-/// Never hidden: a Device receiving the Circle's bytes is a fact the Circle is
-/// entitled to see, and an unnamed one most of all (CONTEXT). It is also exactly
-/// how a peer adopted from a running wp-sync install appears — one state, one
-/// rendering, no special case.
+/// A Device in the Circle that no Membership claim names; never hidden, because
+/// a Device receiving the Circle's bytes is a fact the Circle may see.
 #[derive(Clone, Debug)]
 pub struct UnclaimedDevice {
     pub device: DeviceId,
-    /// The name that Device announced about itself. It can say anything, and the
-    /// row is worded so nobody reads it as a Person's name.
+    /// The name that Device announced about itself — it can say anything.
     pub announced_name: String,
     pub presence: Presence,
     pub in_sync: Option<u8>,
@@ -154,11 +109,10 @@ pub struct UnclaimedDevice {
 /// A Device knocking at this Device, and what kith knows about why.
 #[derive(Clone, Debug)]
 pub struct PendingJoin {
-    /// Named in the prompt's title: admitting a Device to the wrong Circle is
-    /// real and irreversible, so kith never leaves it implied.
+    /// Named in the prompt's title; admitting to the wrong Circle is irreversible.
     pub circle_name: String,
-    /// A Device Identity, a name that Device announced, and when it was first
-    /// seen. That is the whole truth available — there is no Person in it.
+    /// A Device Identity, an announced name and a first-seen time — the whole
+    /// truth available, and there is no Person in it.
     pub request: JoinRequest,
     pub solicited: Solicited,
 }
@@ -170,16 +124,15 @@ impl PendingJoin {
     }
 }
 
-/// Whether a knock was expected. The window lives on the Steward's Device, which
-/// is the one machine where admission actually happens.
+/// Whether a knock was expected, per the invite window on the Steward's Device.
 #[derive(Clone, Debug)]
 pub enum Solicited {
     /// An invite window for this Circle is open.
     ByOpenInvite { issued_at: String, expires_at: String },
     /// A window existed and has closed. Approvable, behind a typed confirmation.
     ByClosedInvite { closed_at: String, reason: WindowClose },
-    /// No window was ever opened for this Circle, or `invites.json` was lost —
-    /// which degrades to *unsolicited*, the safe and noisier answer.
+    /// No window was ever opened, or the record was lost — which degrades to
+    /// unsolicited, the safe and noisier answer.
     Unsolicited,
 }
 
@@ -190,27 +143,21 @@ pub enum WindowClose {
     Superseded,
 }
 
-/// What the Person asked for. Everything here is an act the caller performs;
-/// this screen decides nothing on its own.
+/// What the Person asked for; every variant is an act the caller performs.
 #[derive(Clone, Debug)]
 pub enum MembersAction {
-    /// Admit this knocking Device — `engine.admit`. The one real gate, and it
-    /// has already been confirmed by hand.
+    /// Admit this knocking Device — already confirmed by hand.
     Approve(JoinRequest),
-    /// Hide this knock locally. The engine is not told and neither is the
-    /// Device: there is no server to deliver a "no".
+    /// Hide this knock locally; there is no server to deliver a "no".
     Reject(JoinRequest),
     Invite,
-    /// The caller raises the typed confirmation (circles spec §3.9.1) — leaving
-    /// is the one irreversible social act v0.1 has, and it is confirmed by
-    /// typing the Circle's name, not by `y`.
+    /// The caller raises the typed confirmation — leaving is confirmed by typing
+    /// the Circle's name, not by `y`.
     Leave,
     /// A key whose action is unavailable here, carrying the reason ready for the
-    /// status row. ADR-0003 §3: declared and explained, never silently ignored.
+    /// status row.
     Unavailable(String),
 }
-
-// ── the screen ───────────────────────────────────────────────────────
 
 /// The Members screen, with the pending-join prompt as its one overlay.
 pub struct Members {
@@ -221,8 +168,8 @@ pub struct Members {
     /// A banner for a Circle whose Stewardship is vacant, disputed or unknown,
     /// or for a Sync Engine kith cannot reach.
     notice: Option<String>,
-    /// `founder_person` with no claim naming them yet. Rendered as the id's short
-    /// form — never the `founder_device` Identity in its place.
+    /// `founder_person` with no claim naming them yet, rendered as the id's short
+    /// form and never as the `founder_device` Identity.
     unnamed_admin: Option<PersonId>,
     /// Why `[i]` is unavailable on this Device, when it is.
     invite_blocked: Option<String>,
@@ -238,17 +185,13 @@ pub struct Members {
 struct Prompt {
     index: usize,
     /// `Some` once approving needs the fingerprint typed in full — a knock with
-    /// no open window behind it (circles spec §5.3).
+    /// no open window behind it.
     typed: Option<String>,
 }
 
 impl Members {
     /// `people` are the Members; `pending` are the Devices knocking at this
-    /// Device.
-    ///
-    /// A knock only ever reaches the Steward's Device, so a non-Steward passes
-    /// an empty list and never sees the prompt. When there is one, it is raised
-    /// immediately: admission is the whole point of this screen.
+    /// Device, and any one of them raises the prompt immediately.
     pub fn new(people: Vec<MemberView>, pending: Vec<PendingJoin>) -> Self {
         let prompt = (!pending.is_empty()).then(|| Prompt { index: 0, typed: None });
         Self {
@@ -273,8 +216,7 @@ impl Members {
         self
     }
 
-    /// Devices in the Circle that no Membership claim names. Pass them: a Device
-    /// holding the Circle's content is never hidden from the Circle.
+    /// Devices in the Circle that no Membership claim names.
     pub fn with_unclaimed(mut self, devices: Vec<UnclaimedDevice>) -> Self {
         self.unclaimed = devices;
         self
@@ -287,24 +229,20 @@ impl Members {
         self
     }
 
-    /// The Circle names an admin no Membership claim has named yet. Shown as
-    /// `unknown Person (p-01k9r7)`; a Device Identity never stands in for it.
+    /// The Circle names an admin no Membership claim has named yet.
     pub fn with_unnamed_admin(mut self, person: PersonId) -> Self {
         self.unnamed_admin = Some(person);
         self
     }
 
-    /// Grey `[i]` with its reason rather than hiding it (ADR-0003 §3). The
-    /// reason is a full sentence: kith refuses this on this Device, and cannot
-    /// stop other software on it from doing something similar.
+    /// Grey `[i]` with its reason rather than hiding it.
     pub fn invite_unavailable(mut self, reason: impl Into<String>) -> Self {
         self.invite_blocked = Some(reason.into());
         self
     }
 
-    /// A Device started knocking while this screen was open. The prompt is
-    /// raised unless one is already open — a second request queues rather than
-    /// stealing the keystroke that was meant for the first.
+    /// A Device started knocking while this screen was open; a second request
+    /// queues rather than stealing the keystroke meant for the first.
     pub fn push_pending(&mut self, join: PendingJoin) {
         self.pending.push(join);
         if self.prompt.is_none() {
@@ -320,17 +258,13 @@ impl Members {
         self.prompt.is_some()
     }
 
-    // ── rendering ────────────────────────────────────────────────────
-
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
         }
         let width = area.width as usize;
 
-        // The footer is reserved first. It carries the two things this screen is
-        // not allowed to leave off — what a Role is not, and what Presence is
-        // not — so the list gives up rows before the caveats do.
+        // Reserved first, so the list gives up rows before the caveats do.
         let footer = self.footer(width, area.height);
         let footer_h = footer.len().min(area.height as usize) as u16;
         let head = self.head(width);
@@ -372,7 +306,7 @@ impl Members {
         }
         if let Some(admin) = &self.unnamed_admin {
             // A PersonId alone is not a Member — no claim, no row — so the admin
-            // is named here, as the id, and never as the Steward's Device.
+            // is named here, as the id, never as the Steward's Device.
             let text = format!(
                 "admin  unknown Person ({}) — no Membership claim names them yet",
                 admin.short()
@@ -403,8 +337,7 @@ impl Members {
             None => String::new(),
         };
         title.push_str(&plural(members, "Member", "Members"));
-        // With nothing to read, kith says so. `0 connected` would be a claim it
-        // is in no position to make.
+        // `0 connected` would be a claim kith is in no position to make.
         if blind {
             title.push_str(" · presence unknown");
         } else {
@@ -455,8 +388,6 @@ impl Members {
     fn keys_line(&self) -> Line<'static> {
         let mut parts = Vec::new();
         match &self.invite_blocked {
-            // Greyed with its reason, not hidden — the key exists, and so does
-            // the reason it will not fire.
             Some(reason) => parts.push(format!("i invite · {}", first_clause(reason))),
             None => parts.push("i invite".to_string()),
         }
@@ -549,14 +480,11 @@ impl Members {
         );
     }
 
-    // ── keys ─────────────────────────────────────────────────────────
-
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<MembersAction> {
         if key.kind == KeyEventKind::Release {
             return None;
         }
-        // Keys route overlay → screen, so the prompt shadows everything below it
-        // while it is open.
+        // Keys route overlay → screen: the prompt shadows everything below it.
         if self.prompt.is_some() {
             return self.prompt_key(key);
         }
@@ -575,7 +503,7 @@ impl Members {
             let expected = self.pending[index].fingerprint();
             match key.code {
                 KeyCode::Esc => {
-                    // Back to the prompt, not out of it. Nothing has been decided.
+                    // Back to the prompt, not out of it; nothing is decided.
                     if let Some(p) = self.prompt.as_mut() {
                         p.typed = None;
                     }
@@ -613,9 +541,8 @@ impl Members {
         match key.code {
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 match self.pending[index].solicited {
-                    // A knock the Circle was expecting is one key. Anything else
-                    // asks for the fingerprint in full: friction here is the
-                    // feature, and habit is what it is defending against.
+                    // An expected knock is one key; anything else asks for the
+                    // fingerprint in full, because friction here is the feature.
                     Solicited::ByOpenInvite { .. } => Some(self.decide(index, true)),
                     _ => {
                         if let Some(p) = self.prompt.as_mut() {
@@ -625,14 +552,13 @@ impl Members {
                     }
                 }
             }
-            // `x` is the keymap's reject (cli-tui §6.4); `r` is the spelling in
-            // circles §5.3. Both are accepted, and only `x` is printed.
+            // Both spellings of reject are accepted; only `x` is printed.
             KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('r') | KeyCode::Char('R') => {
                 Some(self.decide(index, false))
             }
             KeyCode::Esc | KeyCode::Char('q') => {
-                // Decide later. The request stays pinned to this screen; a prompt
-                // that punishes hesitation trains people to press yes.
+                // Decide later: a prompt that punishes hesitation trains people
+                // to press yes. The request stays pinned to this screen.
                 self.prompt = None;
                 None
             }
@@ -694,9 +620,8 @@ impl Members {
                 }
             }
             KeyCode::Enter => {
-                // Enter decides a knock. There is no Member detail screen in
-                // v0.1, so on a Member row it does nothing rather than opening
-                // something that is not there.
+                // Enter decides a knock; there is no Member detail screen, so on
+                // a Member row it does nothing.
                 if self.selected < self.pending.len() {
                     self.prompt = Some(Prompt { index: self.selected, typed: None });
                 }
@@ -735,8 +660,6 @@ impl Members {
     }
 }
 
-// ── row formatting ───────────────────────────────────────────────────
-
 struct Cols {
     name: usize,
     role: usize,
@@ -746,8 +669,7 @@ struct Cols {
     trailing: usize,
 }
 
-/// Columns shrink from the right as the terminal narrows; Presence is the last
-/// thing to go, because it is the column the screen exists for.
+/// Columns shrink from the right as the terminal narrows; Presence goes last.
 fn columns(width: usize) -> Cols {
     let (name, role, presence, sync) = if width >= 58 {
         (17, 8, 15, 8)
@@ -779,15 +701,14 @@ fn member_row(member: &MemberView, cols: &Cols, width: usize) -> String {
     let mut row = cell(&name, cols.name);
     row.push_str(&cell(role_word(member.role), cols.role));
 
-    // A Member whose Devices are not in the Circle has no connection to report
-    // and no percentage to report; the row says which of the two it is instead
-    // of printing a figure it would have to invent.
+    // A Member whose Devices are not in the Circle has nothing to report; the row
+    // says which case it is rather than printing a figure it would have to invent.
     let (presence, sync, note) = if let Some(left) = &member.left_at {
         ("—".to_string(), "—".to_string(), format!("left · {}", short_date(left)))
     } else if !member.in_circle {
         ("—".to_string(), "—".to_string(), "not in this Circle".to_string())
     } else if member.is_you {
-        // kith holds no connection to itself. `—` is the honest column.
+        // kith holds no connection to itself; `—` is the honest column.
         ("—".to_string(), "—".to_string(), asserted_note(member, cols, width))
     } else {
         (
@@ -803,8 +724,8 @@ fn member_row(member: &MemberView, cols: &Cols, width: usize) -> String {
     trim_to(&row, width)
 }
 
-/// The trailing note on a present Member's row: when their claim was last
-/// asserted, plus the admin badge where the terminal is wide enough for it.
+/// The trailing note on a Member's row: when their claim was last asserted, plus
+/// the badges where the terminal is wide enough for them.
 fn asserted_note(member: &MemberView, cols: &Cols, width: usize) -> String {
     let mut note = String::new();
     if cols.trailing >= 6 && !member.asserted.is_empty() {
@@ -839,8 +760,7 @@ fn unclaimed_row(device: &UnclaimedDevice, cols: &Cols) -> String {
     row
 }
 
-/// Never "online", never "offline as a fact about the Person", and `unknown` is
-/// a real answer rather than a polite way of saying no.
+/// Never "online" or "offline", and `unknown` is a real answer.
 fn presence_word(presence: Presence) -> &'static str {
     match presence {
         Presence::Connected => "connected",
@@ -856,8 +776,7 @@ fn role_word(role: Role) -> &'static str {
     }
 }
 
-/// A name a Device announced about itself, worded so it is never read as a
-/// Person's name.
+/// A name a Device announced, worded so it is never read as a Person's name.
 fn announced(name: &str) -> String {
     if name.trim().is_empty() {
         "(this Device announced no name)".to_string()
@@ -876,8 +795,6 @@ fn style_row(text: String, selected: bool, pending: bool) -> Line<'static> {
     }
     Line::from(text).style(style)
 }
-
-// ── the prompt's body ────────────────────────────────────────────────
 
 /// Everything the Steward is given to decide with, and nothing kith cannot see.
 fn prompt_body(join: &PendingJoin, typed: Option<&str>, width: usize) -> Vec<Line<'static>> {
@@ -914,8 +831,7 @@ fn prompt_body(join: &PendingJoin, typed: Option<&str>, width: usize) -> Vec<Lin
         return out;
     }
 
-    // Unsolicited leads with the warning, not with the Device: the Device is the
-    // least important fact on screen when nobody was expected.
+    // Unsolicited leads with the warning, not with the Device.
     if matches!(join.solicited, Solicited::Unsolicited) {
         push_wrapped(
             &mut out,
@@ -969,23 +885,14 @@ fn invite_line(solicited: &Solicited) -> String {
             WindowClose::Spent => format!("already used, {}", ago(closed_at)),
             WindowClose::Superseded => format!("replaced by a newer one {}", ago(closed_at)),
         },
-        // No window has ever been opened, or the record was lost — which reads
-        // the same way on purpose, because the safe answer is the same.
         Solicited::Unsolicited => "none — you have not invited anyone to this Circle".to_string(),
     }
 }
 
-// ── small helpers ────────────────────────────────────────────────────
-
 /// The first eight characters of a Device Identity, grouped 4-4: `UJZD-EGXD`.
 ///
-/// Eight base32 characters is 40 bits: enough to tell two Devices apart in a
-/// pending list and to catch a transcription error against a known-good source,
-/// not enough to resist someone deliberately grinding a matching prefix. The
-/// prompt says so where the key is pressed.
-///
-/// Kept local to this screen so the TUI does not reach into a command module for
-/// a six-line pure function.
+/// Forty bits: enough to catch a transcription error against a known-good
+/// source, not enough to resist a deliberately ground matching prefix.
 pub fn fingerprint(device: &str) -> String {
     let squashed = squash(device);
     let head: String = squashed.chars().take(8).collect();
@@ -1001,8 +908,8 @@ pub fn fingerprint(device: &str) -> String {
     }
 }
 
-/// Uppercase, alphanumerics only — the shape a Person types back is not the
-/// shape kith printed, and hyphens and case are never the difference.
+/// Uppercase, alphanumerics only — hyphens and case are never the difference
+/// between what kith printed and what a Person types back.
 fn squash(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
@@ -1047,7 +954,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Pad or truncate to a fixed column, with a trailing space so columns never run
-/// together. Truncation is marked, per cli-tui §7.6.
+/// together. Truncation is marked.
 fn cell(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -1110,11 +1017,6 @@ fn centred(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-// ── time, in this Device's own zone and from its own clock ───────────
-//
-// kith trusts its own clock and no other; there is no time authority in a
-// serverless product and kith does not simulate one.
-
 fn seconds_since(at: &str) -> Option<i64> {
     let then = at.parse::<jiff::Timestamp>().ok()?;
     Some(jiff::Timestamp::now().as_second() - then.as_second())
@@ -1134,8 +1036,7 @@ fn ago(at: &str) -> String {
     match seconds_since(at) {
         Some(s) if s < 0 => "just now".to_string(),
         Some(s) => format!("{} ago", human_duration(s)),
-        // A timestamp kith cannot parse is shown as it was written rather than
-        // replaced by a guess.
+        // Shown as written rather than replaced by a guess.
         None => at.to_string(),
     }
 }
@@ -1228,7 +1129,6 @@ mod tests {
     #[test]
     fn fingerprint_is_grouped_four_and_four() {
         assert_eq!(fingerprint("UJZDEGXD4ZLNKXU5"), "UJZD-EGXD");
-        // Hyphens in the Identity are not part of it; grouping is kith's.
         assert_eq!(fingerprint("ujzd-egxd-4zln"), "UJZD-EGXD");
         assert_eq!(fingerprint("AB"), "AB");
     }
@@ -1266,7 +1166,6 @@ mod tests {
         let rendered: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("UJZD-EGXD"), "{rendered}");
         assert!(rendered.contains("no Membership claim yet"), "{rendered}");
-        // The announced name is shown, and shown as an announcement.
         assert!(rendered.contains("calls itself \"ben-thinkpad\""), "{rendered}");
         assert_eq!(screen.row_count(), 1, "an unclaimed Device is a row a key can reach");
     }
@@ -1390,7 +1289,6 @@ mod tests {
         let mut screen = Members::new(vec![], vec![knock("stranger", Solicited::Unsolicited)]);
         assert!(screen.handle_key(key(KeyCode::Char('a'))).is_none(), "no window, no one key");
 
-        // A wrong fingerprint admits nobody, however many times Enter is pressed.
         for c in "AAAABBBB".chars() {
             assert!(screen.handle_key(key(KeyCode::Char(c))).is_none());
         }
@@ -1440,7 +1338,6 @@ mod tests {
         assert!(!screen.is_prompt_open());
         assert_eq!(screen.pending_count(), 1, "hesitating decides nothing");
 
-        // And it is reachable again from the row it left behind.
         assert!(screen.handle_key(key(KeyCode::Enter)).is_none());
         assert!(screen.is_prompt_open());
     }

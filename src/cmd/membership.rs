@@ -1,30 +1,11 @@
 //! The four social verbs — `kith invite`, `kith join`, `kith approve`,
 //! `kith reject`.
 //!
-//! ROADMAP §3 steps 6, 7 and 8: everything that happens between "Ana has a
-//! Circle" and "Ben's Gallery fills up". Four rules from the ADRs shape every
-//! line of it, and none of them is re-argued here.
-//!
-//! * **Admission is the one real gate kith has.** It runs on the Steward's own
-//!   Device, which is why it is the only thing in this module described as
-//!   enforcement (ADR-0002 §4). Everything after admission is convention plus
-//!   recovery, and the copy says so where the Person is standing.
-//! * **An Invite is a pointer, not a credential.** The code carries a Circle id,
-//!   a Device Identity and an expiry; whoever reads one can knock for as long as
-//!   that Device exists. Expiry bounds when knocks are *expected*, never when
-//!   they are possible — so v0.1 has no revoke and is honest about why.
-//! * **A Role is derived, never stored.** The admin is `.kith/circle.toml`'s
-//!   `founder_person` and nothing else. Approving a join therefore writes
-//!   *nothing* into the synced tree: there is no shared record of who is who,
-//!   and admitting someone changes the engine's Device set alone.
-//! * **Rejection never leaves this Device.** It is a local ignore-list, not an
-//!   engine call and not a message: there is no server to deliver a "no".
-//!
-//! The three local records this module owns (circles spec §2.3) live in
-//! `$XDG_STATE_HOME/kith/` as JSON, because none of them is derivable from the
-//! synced tree and ADR-0001's authority rule keeps non-derivable facts out of the
-//! rebuildable cache. Each one degrades safely when it is lost, and the way it
-//! degrades is documented beside it.
+//! Admission is the one real gate, and it runs on the Steward's own Device. An
+//! Invite is a pointer, not a credential: expiry bounds when knocks are
+//! *expected*, never when they are possible, so v0.1 has no revoke. A Role is
+//! derived from `.kith/circle.toml`, so approving writes nothing into the synced
+//! tree. Rejection is a local ignore-list that never leaves this Device.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -39,16 +20,13 @@ use crate::invite::{self, InviteError};
 use crate::store::claims;
 use crate::store::descriptors::{self, CircleDescriptor};
 
-// Exit codes are sysexits, so the whole binary speaks one dialect (spec §5.1).
+// sysexits, so the whole binary speaks one dialect.
 const EX_OK: i32 = 0;
-/// Refused: not the admin, already a Member, expired, stewardless, ambiguous.
 const EX_FAIL: i32 = 1;
 const EX_USAGE: i32 = 64;
-/// The Sync Engine is unreachable, unauthorised, or below the version floor.
 const EX_UNAVAILABLE: i32 = 69;
 
-/// Default Invite window. Spec §3.2.3 allows 5m–7d through `--expires`; v0.1's
-/// CLI carries no such flag, so 24h is the only bound this build issues.
+/// v0.1 has no `--expires` flag, so 24h is the only Invite window it issues.
 const DEFAULT_TTL_SECS: i64 = 24 * 60 * 60;
 
 const INVITES: &str = "invites.json";
@@ -59,15 +37,8 @@ const DISMISSED: &str = "dismissed.json";
 
 /// Mint or reprint this Circle's single open Invite window, and print its code.
 ///
-/// Admin-only, and **local**: the code is assembled from records this Device
-/// already holds — the Circle descriptor names both the Circle and the Steward's
-/// Device — so a Person whose daemon is down can still hand a friend a code
-/// (spec §4.7). The engine is contacted anyway, but only so that kith can say
-/// plainly that the Device the code points at cannot be reached yet.
-///
-/// `new` supersedes an open window instead of reprinting it. Reprinting is the
-/// default because losing the code costs nothing and must not cost the Person
-/// their remaining window either.
+/// The code is assembled from records this Device already holds, so it works
+/// with the daemon down; the engine is contacted only to warn it is unreachable.
 pub async fn invite(new: bool, address: Option<&str>) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
 
@@ -97,9 +68,8 @@ pub async fn invite(new: bool, address: Option<&str>) -> i32 {
     let (window, reprinted) = match open {
         Some(w) if !new => (w, true),
         superseded => {
-            // At most one window per Circle, so the new one replaces the row it
-            // supersedes rather than sitting beside it. Nothing is lost by that:
-            // a knock arriving now is solicited by the window that is open now.
+            // At most one window per Circle: the new one replaces the row it
+            // supersedes.
             let minted = Window {
                 circle: descriptor.id.clone(),
                 nonce: ulid::Ulid::generate().to_string(),
@@ -114,8 +84,7 @@ pub async fn invite(new: bool, address: Option<&str>) -> i32 {
                 save(&dir.join(INVITES), &windows);
             }
             if superseded.is_some() {
-                // A note, not the code: stderr, so a piped `kith invite` still
-                // carries nothing but the one line a script asked for.
+                // stderr, so a piped `kith invite` carries only the code.
                 eprintln!("The previous window for {} is closed.", circle.name);
             }
             (minted, false)
@@ -138,14 +107,10 @@ pub async fn invite(new: bool, address: Option<&str>) -> i32 {
     EX_OK
 }
 
-/// The whole of `kith invite`'s output, and the honesty that has to travel with
-/// a code (spec §3.2.3).
+/// The whole of `kith invite`'s output.
 ///
-/// When stdout is not a terminal the code goes to stdout **bare** so that
-/// `kith invite | wl-copy` and `kith invite > code.txt` behave, and the prose
-/// goes to stderr, where the Person still reads it. When stdout *is* a terminal
-/// the code is also pushed to the system clipboard with an OSC 52 escape — no
-/// dependency, and it works over ssh.
+/// Piped, the code goes to stdout bare and the prose to stderr. On a terminal
+/// the code also goes to the clipboard by OSC 52, which works over ssh.
 fn print_invite(name: &str, code: &str, window: &Window, unix: i64, reprinted: bool) {
     let remaining = human_duration(window.expires_at - unix);
     let piped = !io::stdout().is_terminal();
@@ -202,21 +167,15 @@ fn print_invite(name: &str, code: &str, window: &Window, unix: i64, reprinted: b
 
 /// Consume an Invite code: knock at the Steward's Device and wait to be admitted.
 ///
-/// Everything up to the knock is local, so a bad paste, a stale code or a Circle
-/// this Device is already in costs nobody a round trip (spec §3.4 steps 2–4).
-///
-/// This build stops at the knock. Completing a join needs the change feed —
-/// `Change::CircleOffered` arrives only while kith is running — so `join` says
-/// what it has done and what has not happened yet rather than hiding the wait
-/// behind a spinner. That is ADR-0002's accepted consequence, made explicit.
+/// Everything up to the knock is local. This build stops at the knock:
+/// completing a join needs the change feed, which arrives only while kith runs.
 pub async fn join(code: &str) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
 
     let ticket = match invite::decode(code) {
         Ok(t) => t,
         Err(InviteError::Expired) => {
-            // The expiry itself is not carried by the error, and the Person
-            // deserves to know how stale the code is rather than just that it is.
+            // The error does not carry the expiry, so decode again with no clock.
             let stale = invite::decode_at(code, 0)
                 .ok()
                 .map(|t| human_duration(jiff::Timestamp::now().as_second() - t.expires_at as i64));
@@ -232,9 +191,7 @@ pub async fn join(code: &str) -> i32 {
             eprintln!("Update kith, or ask them for a code from a build that matches.");
             return EX_USAGE;
         }
-        // A truncating chat client is the overwhelmingly likely cause of a code
-        // that decodes to the wrong checksum, so kith says "damaged" rather than
-        // "invalid": the fix is to re-paste it, not to ask for a new one.
+        // A truncating chat client is the likely cause: re-paste, do not re-issue.
         Err(InviteError::Checksum) => {
             eprintln!("That invite code arrived damaged — check nothing was cut off, and paste");
             eprintln!("it again. Nothing has been contacted.");
@@ -247,8 +204,7 @@ pub async fn join(code: &str) -> i32 {
         }
     };
 
-    // Nothing below has touched the Sync Engine, and the two refusals here keep
-    // it that way.
+    // Nothing above has touched the Sync Engine; these two refusals keep it so.
     let held = local_circles();
     if let Some(already) = held.iter().find(|c| c.id.as_deref() == Some(ticket.circle.0.as_str())) {
         eprintln!("You are already in {} — this invite is for a Circle you hold.", already.name);
@@ -284,10 +240,7 @@ pub async fn join(code: &str) -> i32 {
             None => println!("  On disk   kith has no data directory on this Device"),
         }
         println!();
-        // A join is already a deliberate act — the Person pasted a code — so the
-        // confirmation exists to show *what* is being joined before anything is
-        // registered. With no terminal there is nobody to ask, and refusing
-        // would make `kith join` unusable from a script for no gain in safety.
+        // No terminal means nobody to ask; refusing would only break scripts.
         if io::stdin().is_terminal() && !confirm("Join it?") {
             println!("Nothing was registered. The code stays good until it expires.");
             return EX_OK;
@@ -308,8 +261,7 @@ pub async fn join(code: &str) -> i32 {
         return EX_FAIL;
     }
 
-    // The record is written before the knock, so a crash between the two leaves
-    // something resumable rather than a knock nobody remembers making.
+    // Written before the knock, so a crash leaves something resumable.
     if repeat.is_none() {
         knocks.push(Knock {
             circle: ticket.circle.0.clone(),
@@ -355,11 +307,6 @@ pub async fn join(code: &str) -> i32 {
     EX_OK
 }
 
-/// Where a joined Circle's bytes will land.
-///
-/// The Circle's *name* is not in the ticket — it arrives with `.kith/circle.toml`
-/// on the first sync — so the id names the directory. It is unique by
-/// construction, which the name is not (spec §4.11).
 async fn offered_back(engine: &SyncthingEngine, ticket: &InviteTicket) -> Option<CircleOffer> {
     engine
         .pending_circles()
@@ -423,10 +370,8 @@ fn join_root(circle: &CircleId) -> Option<PathBuf> {
 
 /// Admit a knocking Device into the Circle this Person stewards.
 ///
-/// The whole truth available about a knock is a Device Identity, a name **that
-/// Device announced about itself**, and when it was first seen (spec §3.5.1).
-/// There is no Person in it, so every line printed here is built on a Device and
-/// the prompt says so before it asks anything.
+/// All that is known about a knock is a Device Identity, a name that Device
+/// announced about itself, and when it was first seen. There is no Person in it.
 pub async fn approve(device: Option<&str>) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
     let engine = match reach_engine().await {
@@ -499,10 +444,7 @@ pub async fn approve(device: Option<&str>) -> i32 {
     }
     let agreed = match &solicited {
         Solicited::ByOpenInvite { .. } => confirm("Approve?"),
-        // An unsolicited knock, or one arriving against a window that has closed,
-        // gets more friction rather than a different flag: spec §3.5.2 spends
-        // `--force` here and this build has none, so the Person types the
-        // fingerprint out instead. Friction here is the feature.
+        // Friction rather than a `--force` flag: the fingerprint is typed out.
         _ => {
             println!("This knock was not expected. Type its fingerprint to approve it anyway.");
             typed(&fingerprint(&request.device.0))
@@ -517,9 +459,7 @@ pub async fn approve(device: Option<&str>) -> i32 {
         return refuse_engine(&e);
     }
 
-    // Single use, per the glossary: approval is where "an Invite is consumed by
-    // joining" can actually be implemented, because this is the Device where
-    // admission happens.
+    // Approval is where an Invite is consumed: this is the Device that admits.
     if let Some(w) = windows.iter_mut().find(|w| w.circle == descriptor.id) {
         w.state = WindowState::Spent;
         w.spent_by = Some(request.device.0.clone());
@@ -547,9 +487,7 @@ pub async fn approve(device: Option<&str>) -> i32 {
 
 /// Hide a knocking Device. Local, and told to nobody.
 ///
-/// Rejection needs no seam method and gets none: it records the Device in
-/// `dismissed.json` and kith filters it out of every pending surface. It is
-/// deliberately not `expel` (that removes an *admitted* Device) and deliberately
+/// Deliberately not `expel` (that removes an *admitted* Device) and deliberately
 /// not a dismissal at the engine, which the Device would undo by dialling again.
 pub async fn reject(device: Option<&str>) -> i32 {
     let Some(me) = me() else { return EX_FAIL };
@@ -560,8 +498,7 @@ pub async fn reject(device: Option<&str>) -> i32 {
             Ok(c) => c,
             Err(code) => return code,
         },
-        // Hiding a knock is local state, so it does not need the daemon to
-        // decide which Circle it belongs to either.
+        // Hiding a knock is local state, so it does not need the daemon.
         Err(_) => match stewarded_among(local_circles(), &me, "reject") {
             Ok(c) => c,
             Err(code) => return code,
@@ -578,10 +515,8 @@ pub async fn reject(device: Option<&str>) -> i32 {
         .map(|d| read_state(&d.join(DISMISSED)))
         .unwrap_or_default();
 
-    // A dismissal is keyed by the full Device Identity, so the pending list is
-    // normally what expands a fingerprint into one. When the engine is not
-    // answering, a Person who has the whole Identity in front of them can still
-    // hide it — rejection is local state, and local state does not need a daemon.
+    // Keyed by the full Device Identity, which the pending list normally expands
+    // a fingerprint into — but local state does not need the daemon.
     let target = match &engine {
         Ok(e) => match e.pending_joins().await {
             Ok(pending) => {
@@ -633,8 +568,7 @@ pub async fn reject(device: Option<&str>) -> i32 {
     println!("It is not told anything: there is no server to deliver a \"no\". If someone is");
     println!("waiting on you, tell them yourself.");
     match &where_ {
-        // v0.1's CLI carries no `--forget`, so the un-hide is the file itself.
-        // Naming it is what keeps a rejection from becoming an invisible one.
+        // No `--forget` in v0.1, so the un-hide is the file itself.
         Some(path) => println!("Recorded in {} — remove its line to un-hide it.", path.display()),
         None => println!("kith has no state directory on this Device, so this will not survive a restart."),
     }
@@ -644,18 +578,13 @@ pub async fn reject(device: Option<&str>) -> i32 {
 // ── choosing between knocks ──────────────────────────────────────────
 
 /// The knock a verb acts on: the named one, or the only one there is.
-///
-/// With several knocking Devices and no argument kith lists them and stops. A
-/// fingerprint is how one knock is told from another out of band, so it is also
-/// how one is named here.
 fn choose<'a>(
     visible: &'a [JoinRequest],
     query: Option<&str>,
     hidden_here: usize,
     circle: &str,
 ) -> Result<&'a JoinRequest, i32> {
-    // A rejection must never become an invisible one, so a hidden knock is
-    // always counted out loud wherever the pending list looks empty.
+    // A rejection must never become an invisible one, so hidden knocks are counted.
     let hidden_note = |code: i32| {
         if hidden_here > 0 {
             eprintln!(
@@ -711,10 +640,7 @@ fn list(visible: &[JoinRequest]) {
     }
 }
 
-/// Whether a Person's argument names this Device.
-///
-/// Matched against the Identity with its grouping removed, so `UJZD-EGXD`,
-/// `ujzdegxd` and the whole 52-character Identity all name the same Device.
+/// Whether an argument names this Device: prefix match, grouping and case removed.
 fn names(query: &str, device: &str) -> bool {
     let q = squash(query);
     !q.is_empty() && squash(device).starts_with(&q)
@@ -728,21 +654,14 @@ fn squash(s: &str) -> String {
 }
 
 /// Long enough to be a whole Device Identity rather than a fingerprint.
-///
-/// Only used where there is no pending list to expand a fingerprint against, and
-/// deliberately generous: the seam's handle is opaque above it (ADR-0002 §1), so
-/// kith checks that a Person typed something Identity-shaped and no more.
 fn looks_like_a_device_identity(s: &str) -> bool {
     squash(s).len() >= 32
 }
 
 /// The first eight characters of a Device Identity, grouped 4-4: `UJZD-EGXD`.
 ///
-/// This is the string two People read to each other out of band — the joiner's
-/// kith prints theirs, the Steward's kith prints the one that knocked, and a
-/// match is the only evidence either of them has about who is on the other end.
-/// Eight base32 characters is 40 bits: enough to tell two Devices apart and to
-/// catch a transcription error, not enough to resist someone grinding a prefix.
+/// The string two People read to each other out of band. 40 bits: enough to
+/// catch a transcription error, not enough to resist a ground prefix.
 pub fn fingerprint(device: &str) -> String {
     let squashed = squash(device);
     let head: String = squashed.chars().take(8).collect();
@@ -757,24 +676,16 @@ pub fn fingerprint(device: &str) -> String {
 /// A Circle whose bytes this Device holds.
 #[derive(Clone, Debug)]
 struct Held {
-    /// The Circle's id, once its descriptor has arrived. `None` is spec §4.10 —
-    /// a real state, not a fault.
+    /// `None` until the descriptor arrives — a real state, not a fault.
     id: Option<String>,
-    /// What to call it on screen: the descriptor's name, else the transport's
-    /// label, else the directory it lives in. kith never mints the Circle's name
-    /// from the engine's label into the record; this is display only.
+    /// Display only; the engine's label is never minted into the record.
     name: String,
     root: PathBuf,
     descriptor: Option<CircleDescriptor>,
 }
 
-/// Every Circle this Device holds, from the two sources that between them see
-/// all of them.
-///
-/// [`local_circles`] needs nothing running, which is what lets `kith invite`
-/// work with the daemon down. The Sync Engine's list is the only way to find a
-/// Circle a Person placed somewhere else with `--path`, so it is folded in
-/// whenever the engine is answering.
+/// Every Circle this Device holds. [`local_circles`] needs nothing running; the
+/// engine's list is the only way to find one placed elsewhere with `--path`.
 async fn held_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<Held> {
     let mut found = local_circles();
 
@@ -794,11 +705,7 @@ async fn held_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<Held> {
     found
 }
 
-/// The Circles kith itself placed, read straight off this Device.
-///
-/// No engine, no daemon, no network: a Circle root is a directory with a
-/// `.kith/` in it, and that is enough to know the Circle exists and who founded
-/// it. Everything `kith invite` needs lives here.
+/// The Circles kith itself placed, read straight off this Device — no daemon.
 fn local_circles() -> Vec<Held> {
     let mut found: Vec<Held> = Vec::new();
     let Some(dir) = circles_dir() else {
@@ -821,8 +728,7 @@ fn local_circles() -> Vec<Held> {
     found
 }
 
-/// Add a Circle unless its root is already in the list. Two sources see the
-/// same Circle whenever kith placed it where kith puts them.
+/// Add a Circle unless its root is already in the list.
 fn push(held: Held, found: &mut Vec<Held>) {
     let key = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let root = key(&held.root);
@@ -835,8 +741,7 @@ fn read_held(root: &Path, label: Option<&str>, engine_id: Option<&str>) -> Held 
     let descriptor = match descriptors::read_circle(root) {
         Ok(d) => d,
         Err(e) => {
-            // A descriptor that exists and does not parse is somebody's problem,
-            // but not a reason to pretend the Circle is not here.
+            // A descriptor that will not parse is no reason to hide the Circle.
             eprintln!("! {e}");
             None
         }
@@ -860,10 +765,8 @@ fn read_held(root: &Path, label: Option<&str>, engine_id: Option<&str>) -> Held 
 
 /// Choose the Circle a verb acts on.
 ///
-/// v0.1's CLI has no `--circle` (ROADMAP §2 fixes the flag list), so exactly one
-/// resolvable Circle is the only case kith can act on. It refuses to guess
-/// between several rather than picking: admitting a Device to the wrong Circle
-/// is real and irreversible (spec §4.8).
+/// v0.1's CLI has no `--circle`, and kith refuses to guess between several:
+/// admitting a Device to the wrong Circle is real and irreversible.
 fn pick(mut circles: Vec<Held>, verb: &str) -> Result<Held, i32> {
     match circles.len() {
         1 => Ok(circles.remove(0)),
@@ -889,10 +792,6 @@ fn pick(mut circles: Vec<Held>, verb: &str) -> Result<Held, i32> {
 }
 
 /// The Circle this Person stewards, for `approve` and `reject`.
-///
-/// Pending joins are Circle-agnostic at the seam, so the Circle is resolved
-/// first and the knock is admitted into that one. A Person who holds a Circle
-/// they do not steward is told who its admin is rather than told they have none.
 async fn stewarded<E: SyncEngine>(engine: &E, me: &Identity, verb: &str) -> Result<Held, i32> {
     stewarded_among(held_circles(Some(engine)).await, me, verb)
 }
@@ -916,7 +815,6 @@ fn stewarded_among(all: Vec<Held>, me: &Identity, verb: &str) -> Result<Held, i3
     Err(EX_FAIL)
 }
 
-/// A Circle's admin, as one line for a list.
 fn admin_of(c: &Held) -> String {
     match stewardship(c) {
         Stewardship::Held { person, .. } => name_person(c, &person),
@@ -926,16 +824,11 @@ fn admin_of(c: &Held) -> String {
     }
 }
 
-/// Whether this Person is the Circle's admin, by the one record that says so.
 fn is_admin(c: &Held, me: &Identity) -> bool {
     matches!(stewardship(c), Stewardship::Held { ref person, .. } if person == me.person.as_str())
 }
 
 /// The Circle's descriptor, if this Person may act as its admin.
-///
-/// Every refusal here is exit 1 and names what is actually wrong: a Circle whose
-/// records have not arrived, one whose admin has left, one whose Devices
-/// disagree about who founded it, and one whose admin is somebody else.
 fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor, i32> {
     match stewardship(c) {
         Stewardship::Unknown => {
@@ -976,9 +869,7 @@ fn steward_check(c: &Held, me: &Identity, verb: &str) -> Result<CircleDescriptor
                     eprintln!("software on your Device from doing something similar, and it will not");
                     eprintln!("pretend otherwise.");
                 }
-                // The admin's PersonId is known and no claim has named them yet.
-                // kith prints the id's short form and never the founder's Device
-                // Identity in its place: a Device is not a Person.
+                // The short id, never a Device Identity: a Device is not a Person.
                 None => {
                     eprintln!(
                         "Only {}'s admin (unknown Person {}) can invite people or approve joins.",
@@ -1010,19 +901,16 @@ enum Stewardship {
     Held { person: String, device: String },
     /// The founder stamped `left_at` into their own Device's Membership claim.
     Vacant { since: String, was: String },
-    /// Copies of `.kith/circle.toml` disagree about `founder_person` (spec §4.9).
+    /// Copies of `.kith/circle.toml` disagree about `founder_person`.
     Disputed { claimants: Vec<String> },
-    /// No readable `.kith/circle.toml` in the tree yet (spec §4.10).
+    /// No readable `.kith/circle.toml` in the tree yet.
     Unknown,
 }
 
 /// Derive the Circle's stewardship from its records and nothing else.
 ///
-/// The Steward is read from `.kith/circle.toml` rather than from the transport,
-/// because that record reads the same from every Device including the Steward's
-/// own — the engine's introducer flag is invisible from exactly the vantage
-/// point that matters most (ADR-0002 §3), so it is a cross-check and never a
-/// source.
+/// Never from the engine's introducer flag: it is invisible from the Steward's
+/// own Device, the one vantage point that matters most.
 fn stewardship(c: &Held) -> Stewardship {
     let Some(d) = &c.descriptor else {
         return Stewardship::Unknown;
@@ -1063,12 +951,10 @@ fn stewardship(c: &Held) -> Stewardship {
     }
 }
 
-/// Copies of `.kith/circle.toml` that the transport left beside it.
+/// Copies of `.kith/circle.toml` the transport left beside it.
 ///
-/// The name of a copy belongs to the engine, so this recognises them by the rule
-/// the format itself gives (ADR-0004 §4.3): the key is the segment before the
-/// first dot, and anything else named `circle.*.toml` is a second copy of the
-/// one write-once record. That keeps the engine's spelling below the seam.
+/// Recognised by the format's own rule — the key is the segment before the first
+/// dot — so the engine's spelling for a conflict copy stays below the seam.
 fn descriptor_copies(root: &Path) -> Vec<CircleDescriptor> {
     let dir = descriptors::kith_dir(root);
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1102,10 +988,7 @@ fn claim_name(c: &Held, person: &str) -> Option<String> {
 }
 
 /// A Person as a surface may print them: their name, or their id's short form.
-///
-/// Never the Device Identity from `founder_device` in its place. A Device is not
-/// a Person, and printing one where the other belongs is the single confusion
-/// the whole membership design exists to prevent.
+/// Never the Device Identity in its place — a Device is not a Person.
 fn name_person(c: &Held, person: &str) -> String {
     match claim_name(c, person) {
         Some(name) => name,
@@ -1124,22 +1007,13 @@ fn circles_dir() -> Option<PathBuf> {
 
 // ── the same three records, for the TUI ──────────────────────────────
 //
-// The Members screen decides exactly what `kith approve` and `kith reject`
-// decide, so it has to read and write the same three files — a Device hidden
-// from one surface and visible on the other is two answers to one question.
-//
-// Every function here is quiet by construction: a TUI is inside the alternate
-// screen, where a stray `eprintln!` corrupts the frame a Person is looking at.
-// The private CLI readers narrate their failures on stderr, which is right for a
-// command and wrong here, so these read the files themselves and degrade in the
-// documented direction instead — silently, and towards the safer answer.
+// The Members screen decides what `kith approve` and `kith reject` decide, on
+// the same three files. Quiet by construction: `eprintln!` corrupts the frame.
 
-/// Whether this Device has an invite window open for a Circle, in the shape the
-/// Members screen renders.
+/// Whether this Device has an invite window open, as the Members screen renders it.
 ///
-/// A window kith cannot read reads as `Unsolicited`: the knock then needs its
-/// fingerprint typed out in full before anybody is admitted. Safe, and noisier —
-/// which is the right way for this particular record to fail (spec §2.3).
+/// A window kith cannot read reads as `Unsolicited`, so the knock needs its
+/// fingerprint typed out in full. Safe, and noisier.
 pub fn open_window(circle: &str) -> crate::tui::members::Solicited {
     use crate::tui::members::{Solicited as Shown, WindowClose};
 
@@ -1166,8 +1040,7 @@ pub fn open_window(circle: &str) -> crate::tui::members::Solicited {
 }
 
 /// The Devices this Person has already turned away in a Circle. An unreadable
-/// record hides nobody, which shows a knock twice rather than silently dropping
-/// one — the same direction as everything else here.
+/// record hides nobody, which shows a knock twice rather than dropping one.
 pub fn dismissed(circle: &str) -> Vec<String> {
     let hidden: Vec<Dismissal> = state_dir()
         .map(|d| quiet_read(&d.join(DISMISSED)))
@@ -1175,8 +1048,7 @@ pub fn dismissed(circle: &str) -> Vec<String> {
     hidden.into_iter().filter(|h| h.circle == circle).map(|h| h.device).collect()
 }
 
-/// Hide a knock from the TUI. Local, and told to nobody: there is no server to
-/// deliver a "no", and that Device may keep knocking.
+/// Hide a knock from the TUI. Local, and told to nobody.
 pub fn dismiss(circle: &str, device: &str, now: &str) {
     let Some(dir) = state_dir() else { return };
     let path = dir.join(DISMISSED);
@@ -1192,10 +1064,7 @@ pub fn dismiss(circle: &str, device: &str, now: &str) {
     let _ = write_state(&path, &hidden);
 }
 
-/// Mark this Circle's window spent after an admission made on the Members
-/// screen. Approval is where "an Invite is consumed by joining" is actually
-/// implemented, because this is the Device where admission happens — and that
-/// is as true of the TUI's prompt as it is of `kith approve`.
+/// Mark this Circle's window spent after an admission on the Members screen.
 pub fn spend_window(circle: &str, device: &str) {
     let Some(dir) = state_dir() else { return };
     let path = dir.join(INVITES);
@@ -1207,7 +1076,6 @@ pub fn spend_window(circle: &str, device: &str) {
     }
 }
 
-/// [`read_state`] with nothing written to stderr.
 fn quiet_read<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     std::fs::read_to_string(path)
         .ok()
@@ -1217,18 +1085,12 @@ fn quiet_read<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
 
 // ── the local records (spec §2.3) ────────────────────────────────────
 
-/// The invite *window*: the bound that actually matters, because this is the one
-/// checked on the Steward's own hardware at approval time.
-///
-/// Losing this file closes every window, so every knock reads as unsolicited and
-/// the human confirms it by hand. Safe, and noisier — which is the right way for
-/// this particular record to fail.
+/// The invite window — the bound that matters, because it is checked on the
+/// Steward's own hardware. Losing this file closes every window: safe, noisier.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Window {
     circle: String,
-    /// The window's id. Not carried in the code this build prints — v0.1's
-    /// ticket has no room for it — and kept because it is what a later format
-    /// binds a knock to a window with.
+    /// The window's id. Not carried in the code this build prints.
     nonce: String,
     issued_at: String,
     expires_at: i64,
@@ -1246,8 +1108,7 @@ enum WindowState {
 }
 
 impl Window {
-    /// The stored state, with the clock applied. An open window whose moment has
-    /// passed is expired whether or not anything has written that down yet.
+    /// The stored state with the clock applied: expiry needs no write.
     fn effective(&self, now: i64) -> WindowState {
         match self.state {
             WindowState::Open if self.expires_at <= now => WindowState::Expired,
@@ -1256,14 +1117,11 @@ impl Window {
     }
 }
 
-/// The joiner's half: a knock this Device has made and is waiting on.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Knock {
     circle: String,
     steward_device: String,
-    /// Where the Circle will be placed when it is offered back. Chosen by the
-    /// joiner before anything is registered, because the joiner chooses the path
-    /// and the engine never auto-accepts (ADR-0002 §1).
+    /// Where the Circle lands when it is offered back; the joiner chooses it.
     root: Option<PathBuf>,
     state: KnockState,
     first_knock_at: String,
@@ -1286,7 +1144,7 @@ struct Dismissal {
     rejected_at: String,
 }
 
-/// Why a knock was expected, or was not (spec §3.5.1).
+/// Why a knock was expected, or was not.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Solicited {
     ByOpenInvite { issued_at: String, expires_at: i64 },
@@ -1338,9 +1196,7 @@ fn state_dir() -> Option<PathBuf> {
     )
 }
 
-/// Read one of the three local records. A missing file is an empty list, and so
-/// is an unreadable one: every record here documents how it degrades when it is
-/// lost, and none of them degrades into a failed command.
+/// Read one of the three local records. Missing or unreadable is an empty list.
 fn read_state<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
@@ -1355,11 +1211,8 @@ fn read_state<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     }
 }
 
-/// Write one of the three local records whole, or not at all.
-///
-/// The same staging the synced descriptors use — write beside, flush, rename —
-/// for the same reason: a half-written record must never be read as a whole one.
-/// Nothing here replicates, so the temp name needs no engine agreement.
+/// Write one of the three local records whole, or not at all: write beside,
+/// flush, rename. Nothing here replicates, so the temp name needs no agreement.
 fn write_state<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -1381,10 +1234,6 @@ fn write_state<T: Serialize>(path: &Path, rows: &[T]) -> io::Result<()> {
 }
 
 /// [`write_state`], with a failure reported rather than propagated.
-///
-/// None of these records is authoritative about anything a Circle shares, so a
-/// Device that cannot write one still invites, joins and admits — it simply
-/// remembers less, in the documented way.
 fn save<T: Serialize>(path: &Path, rows: &[T]) {
     if let Err(e) = write_state(path, rows) {
         eprintln!("! {} could not be written ({e})", path.display());
@@ -1393,7 +1242,6 @@ fn save<T: Serialize>(path: &Path, rows: &[T]) {
 
 // ── the Person, the engine, and the two of them failing ──────────────
 
-/// This Person, or the one sentence that says why kith cannot act for them.
 fn me() -> Option<Identity> {
     match identity::load() {
         Ok(Some(id)) => Some(id),
@@ -1409,10 +1257,8 @@ fn me() -> Option<Identity> {
     }
 }
 
-/// A Sync Engine handle that is known to answer.
-///
-/// Credentials come from the daemon's own configuration, overridden by whatever
-/// the Person wrote in `config.toml`. kith reads both and writes neither.
+/// A Sync Engine handle that is known to answer. Credentials come from the
+/// daemon's own configuration, overridden by `config.toml`; kith writes neither.
 async fn reach_engine() -> Result<SyncthingEngine, SyncError> {
     let cfg = config::load();
     let creds = match SyncthingEngine::discover() {
@@ -1440,8 +1286,6 @@ async fn reach_engine() -> Result<SyncthingEngine, SyncError> {
     Ok(engine)
 }
 
-/// One sentence per engine failure, in kith's vocabulary rather than the
-/// transport's.
 fn engine_reason(e: &SyncError) -> String {
     match e {
         SyncError::Unreachable => {
@@ -1459,8 +1303,7 @@ fn engine_reason(e: &SyncError) -> String {
     }
 }
 
-/// Every engine failure is exit 69 here: `join` and `approve` both write engine
-/// configuration, and kith does not queue engine writes (spec §4.7).
+/// Every engine failure is exit 69: kith does not queue engine writes.
 fn refuse_engine(e: &SyncError) -> i32 {
     eprintln!("{}", engine_reason(e));
     eprintln!("kith adapts a daemon you run; it never starts, embeds or configures one.");
@@ -1479,8 +1322,7 @@ fn confirm(question: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
-/// Confirmation by transcription rather than by keystroke, for the decisions
-/// that should cost more than one letter.
+/// Confirmation by transcription, for decisions worth more than one letter.
 fn typed(expected: &str) -> bool {
     print!("{expected} > ");
     let _ = io::stdout().flush();
@@ -1497,14 +1339,12 @@ fn since(stamp: &str) -> Option<i64> {
     Some(jiff::Timestamp::now().as_second() - then.as_second())
 }
 
-/// A duration as a Person would say it out loud.
 fn human_duration(secs: i64) -> String {
     let s = secs.max(0);
     match s {
         0..=59 => plural(s, "second"),
         60..=3599 => plural(s / 60, "minute"),
-        // Up to two days is read in hours, so a fresh 24h window says "24h"
-        // rather than "1d" and the copy matches the Invite it describes.
+        // Up to two days reads in hours, so a fresh window says "24h".
         3600..=172_799 => match (s / 3600, (s % 3600) / 60) {
             (h, 0) => format!("{h}h"),
             (h, m) => format!("{h}h {m}m"),
@@ -1525,17 +1365,13 @@ fn plural(n: i64, unit: &str) -> String {
 }
 
 /// A unix second in this Device's own timezone: `Fri 8 Aug, 14:13`.
-///
-/// kith trusts its own clock and no other; there is no time authority in a
-/// serverless product and kith does not simulate one.
 fn local_time(unix: i64) -> Option<String> {
     let ts = jiff::Timestamp::from_second(unix).ok()?;
     let zoned = ts.to_zoned(jiff::tz::TimeZone::system());
     Some(zoned.strftime("%a %-d %b, %H:%M").to_string())
 }
 
-/// An RFC 3339 stamp as a bare date: `7 Aug`. Falls back to the stamp itself,
-/// which is ugly and true.
+/// An RFC 3339 stamp as a bare date: `7 Aug`, else the stamp itself.
 fn short_date(stamp: &str) -> String {
     stamp
         .parse::<jiff::Timestamp>()
@@ -1548,11 +1384,8 @@ fn short_date(stamp: &str) -> String {
         .unwrap_or_else(|| stamp.to_string())
 }
 
-/// Put the code on the system clipboard with an OSC 52 escape.
-///
-/// kith has no transport for an Invite and never will (ROADMAP §5), so the most
-/// it does is make the code easy to hand over. OSC 52 needs no dependency and
-/// works over ssh; a terminal that does not implement it ignores the sequence.
+/// Put the code on the system clipboard with an OSC 52 escape — no dependency,
+/// it works over ssh, and a terminal without it ignores the sequence.
 fn osc52(text: &str) {
     print!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
     let _ = io::stdout().flush();
@@ -1629,8 +1462,7 @@ mod tests {
         }
     }
 
-    /// `PersonId`'s inner string is private, so a Person is built here the way
-    /// every other reader builds one: by deserialising it.
+    /// `PersonId`'s inner string is private, so one is built by deserialising.
     fn person_id(s: &str) -> PersonId {
         toml::from_str::<Wrapper>(&format!("person = {s:?}"))
             .expect("a PersonId is just a string on the wire")
@@ -1658,8 +1490,6 @@ mod tests {
 
     // ── fingerprints ─────────────────────────────────────────────────
 
-    /// The one string two People read to each other. Both sides compute it the
-    /// same way or the out-of-band check is worthless.
     #[test]
     fn a_fingerprint_is_eight_characters_grouped_four_and_four() {
         assert_eq!(fingerprint(ANA_DEVICE), "P56I-OI7M");
@@ -1675,8 +1505,6 @@ mod tests {
         assert_eq!(fingerprint("ABCDE"), "ABCD-E");
     }
 
-    /// A Person types back what they were read: any case, any spacing, or the
-    /// whole Identity pasted.
     #[test]
     fn a_knock_is_named_however_the_fingerprint_was_read_back() {
         for query in ["P56I-OI7M", "p56i-oi7m", "P56IOI7M", " p56i oi7m ", ANA_DEVICE] {
@@ -1705,8 +1533,6 @@ mod tests {
         }
     }
 
-    /// Expiry is a clock fact, not a stored one: nothing has to run for a window
-    /// to close, which is what makes losing the file safe.
     #[test]
     fn a_window_closes_on_the_clock_and_not_on_a_write() {
         let w = window(1_000, WindowState::Open);
@@ -1737,8 +1563,6 @@ mod tests {
             solicited(&[window(1_000, WindowState::Spent)], "kith-4tj2q9xa", 500),
             Solicited::ByClosedInvite(WindowState::Spent)
         );
-        // No window at all, and a window belonging to another Circle, both mean
-        // nobody was invited here.
         assert_eq!(solicited(&[], "kith-4tj2q9xa", 500), Solicited::Unsolicited);
         assert_eq!(
             solicited(&open, "kith-somewhere-else", 500),
@@ -1776,8 +1600,7 @@ mod tests {
         assert_eq!(back[0].expires_at, 1_000);
         assert_eq!(back[0].state, WindowState::Open);
 
-        // The staging file is never left behind: a Circle a Person cannot read
-        // with `ls` is one they cannot check.
+        // The staging file is never left behind.
         let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1786,9 +1609,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Spec §2.3's loss behaviour, in code: a lost `invites.json` closes every
-    /// window, so every knock reads as unsolicited and the human confirms it.
-    /// Safe, and noisier — never a failed command.
     #[test]
     fn an_unreadable_window_file_closes_every_window_rather_than_failing() {
         let dir = scratch("state-damaged");
@@ -1835,8 +1655,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// §4.10: a Circle whose records have not arrived has no admin kith can
-    /// name, and kith never promotes a Device Identity into the empty slot.
     #[test]
     fn a_circle_with_no_record_has_no_steward_to_name() {
         let root = scratch("unknown");
@@ -1865,8 +1683,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// One claim with `left_at` and one without means a Device stopped, not that
-    /// the Person did — so the Circle still has its admin.
     #[test]
     fn one_device_of_the_founders_leaving_does_not_vacate_the_circle() {
         let root = scratch("still-held");
@@ -1879,8 +1695,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// §4.9: two copies of the one write-once record naming two founders is the
-    /// only way a Circle can disagree about its admin. kith refuses to pick.
     #[test]
     fn two_records_naming_two_founders_are_disputed_rather_than_resolved() {
         let root = scratch("disputed");
@@ -1906,8 +1720,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A copy that agrees with the record is not a dispute — there is one
-    /// founder and two files saying so.
     #[test]
     fn a_copy_that_agrees_about_the_founder_is_not_a_dispute() {
         let root = scratch("agreeing-copy");
@@ -1925,9 +1737,6 @@ mod tests {
 
     // ── who may act, and on which Circle ─────────────────────────────
 
-    /// A Member who is not the admin is pointed at the Person who is, rather
-    /// than told there is nothing here. Only the admin's own Device ever sees a
-    /// knock, and saying so is the honest half of refusing.
     #[test]
     fn a_person_who_stewards_nothing_is_pointed_at_the_admin() {
         let root = scratch("not-mine");
@@ -1948,8 +1757,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// v0.1's CLI has no `--circle`, so kith acts on one Circle or on none.
-    /// Admitting a Device to the wrong Circle cannot be undone.
     #[test]
     fn kith_refuses_to_guess_between_two_circles() {
         let (a, b) = (scratch("pick-a"), scratch("pick-b"));
@@ -1969,8 +1776,6 @@ mod tests {
 
     // ── naming People, and refusing to name Devices ──────────────────
 
-    /// The single confusion this design exists to prevent: an admin nobody has
-    /// claimed renders as a Person's short id, never as the founder's Device.
     #[test]
     fn an_admin_no_claim_names_is_a_person_id_and_never_a_device_identity() {
         let root = scratch("unnamed-admin");
@@ -1997,7 +1802,6 @@ mod tests {
         assert_eq!(human_duration(4 * 60), "4 minutes");
         assert_eq!(human_duration(3_600), "1h");
         assert_eq!(human_duration(3_600 * 3 + 12 * 60), "3h 12m");
-        // A fresh window says what its own copy says.
         assert_eq!(human_duration(DEFAULT_TTL_SECS), "24h");
         assert_eq!(human_duration(19 * 3_600 + 12 * 60), "19h 12m");
         assert_eq!(human_duration(2 * 86_400), "2d");
@@ -2024,8 +1828,6 @@ mod tests {
         assert_eq!(base64(b"KITH1-AH6BTS5I"), "S0lUSDEtQUg2QlRTNUk=");
     }
 
-    /// The code and the ticket that made it are the same fact twice, and the
-    /// window is what bounds both.
     #[test]
     fn the_printed_code_carries_the_window_it_was_minted_under() {
         let w = window(1_786_000_000, WindowState::Open);

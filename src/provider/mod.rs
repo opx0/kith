@@ -1,12 +1,8 @@
-//! The Provider seam (ADR-0003) — the content-type-aware layer.
+//! The Provider seam — the content-type-aware layer the core knows nothing
+//! about. v0.1 registers exactly one Provider, compiled in.
 //!
-//! The core knows People, Circles, Collections and Items. It knows nothing about
-//! wallpapers; that knowledge lives entirely behind this trait. v0.1 registers
-//! exactly one Provider, compiled in.
-//!
-//! The seam is synchronous on purpose: Providers do plain I/O and CPU work, and
-//! the core runs every call on `spawn_blocking`. Concurrency stays the core's
-//! problem, which keeps runtime types out of the seam.
+//! Synchronous on purpose: the core runs every call on `spawn_blocking`, which
+//! keeps runtime types out of the seam.
 
 use std::path::Path;
 
@@ -19,38 +15,28 @@ pub trait Provider: Send + Sync {
     /// Stable identifier ("wallpaper"). Recorded in Collection metadata.
     fn id(&self) -> &'static str;
 
-    /// Does this Provider claim these bytes?
-    ///
-    /// Must be cheap and pure — extension match plus the bounded magic-byte
-    /// prefix the core already sniffed, never a full read. This is also the
-    /// import gate: content a Collection's Provider does not claim is refused
-    /// with a message, not silently accepted.
+    /// Does this Provider claim these bytes? Must be cheap and pure — never a
+    /// full read.
     fn claims(&self, candidate: &ImportCandidate<'_>) -> bool;
 
     /// Facts read from the content itself at import time. Pure: no network, no
-    /// mutation. Producing them is this seam's job; where they are stored is
-    /// ADR-0004's.
+    /// mutation.
     fn extract_metadata(&self, candidate: &ImportCandidate<'_>) -> Result<ProviderFacts, ProviderError>;
 
-    /// Produce a preview within `budget` pixels. Returns pixels or text — never
-    /// escape sequences. The core owns all terminal encoding.
+    /// Produce a preview within `budget` pixels — pixels or text, never escape
+    /// sequences. The core owns all terminal encoding.
     fn preview(&self, item: &Item, budget: PixelBudget) -> Result<Preview, ProviderError>;
 
     /// Actions this Provider offers on a claimed Item *on this Device*.
     ///
-    /// Availability is per-Device: no detected backend means Apply is declared
-    /// `Unavailable` with a reason, never omitted — a missing Action is a bug
-    /// report, a declared-unavailable one is an explanation.
+    /// An unavailable Action is declared with a reason, never omitted.
     fn actions(&self, item: &Item) -> Vec<ActionDecl>;
 
-    /// Targets Apply can address here, enumerated at call time. Monitors
+    /// Targets Apply can address here, enumerated at call time — monitors
     /// hotplug, so nothing is cached.
     fn apply_targets(&self) -> Result<Vec<ApplyTarget>, ProviderError>;
 
-    /// Execute a declared Action.
-    ///
-    /// Must leave no half-state on failure: a failed Apply changes nothing on
-    /// screen and records nothing.
+    /// Execute a declared Action, leaving no half-state on failure.
     fn perform(
         &self,
         action: &str,
@@ -92,9 +78,6 @@ pub struct PixelBudget {
 pub struct ActionDecl {
     /// Namespaced: `wallpaper.apply`.
     pub id: String,
-    pub label: String,
-    /// True → the TUI and CLI offer target selection.
-    pub needs_target: bool,
     pub availability: Availability,
 }
 

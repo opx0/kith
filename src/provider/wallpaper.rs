@@ -1,10 +1,7 @@
 //! The wallpaper Provider — v0.1's only Provider, compiled into the binary.
 //!
-//! Inside it, a second private trait carries the Waypaper pattern: one frontend
-//! over several interchangeable apply-backends. The matrix is deliberately small
-//! — the maintainers can actually test these — and it grows by contribution,
-//! never by promise. Supporting every desktop in one process is what put Variety
-//! into maintenance mode.
+//! A private trait carries one frontend over several interchangeable
+//! apply-backends. The matrix is deliberately small.
 
 use std::path::Path;
 use std::process::Command;
@@ -30,7 +27,6 @@ trait ApplyBackend: Send + Sync {
     fn apply(&self, bytes: &Path, target: &ApplyTarget) -> Result<(), ActionError>;
 }
 
-/// What we can tell about the session without asking a desktop for permission.
 pub struct SessionEnv {
     pub wayland: bool,
     pub x11: bool,
@@ -52,8 +48,6 @@ fn on_path(binary: &str) -> bool {
         })
         .unwrap_or(false)
 }
-
-// ── the v0.1 matrix ──────────────────────────────────────────────────
 
 struct Swww;
 impl ApplyBackend for Swww {
@@ -148,10 +142,8 @@ impl WallpaperProvider {
         }
     }
 
-    /// The backend that will actually run here, or nothing.
-    ///
-    /// A configured custom command always wins — it is the escape hatch that
-    /// keeps the matrix from having to grow for every desktop.
+    /// The backend that will actually run here, or nothing. A configured custom
+    /// command always wins.
     fn active(&self) -> Option<&dyn ApplyBackend> {
         if self.custom_command.is_some() {
             return None;
@@ -209,7 +201,6 @@ impl Provider for WallpaperProvider {
 
     fn preview(&self, item: &Item, budget: PixelBudget) -> Result<Preview, ProviderError> {
         let Some(path) = &item.path else {
-            // Bytes have not arrived yet. The text card is the tier that never fails.
             return Ok(Preview::Text(format!("{} — not yet arrived", item.title)));
         };
         let img = image::open(path).map_err(|e| ProviderError::Unreadable(e.to_string()))?;
@@ -220,15 +211,12 @@ impl Provider for WallpaperProvider {
         let availability = if self.custom_command.is_some() || self.active().is_some() {
             Availability::Available
         } else {
-            // Declared and explained, never silently omitted.
             Availability::Unavailable {
                 reason: "no wallpaper backend detected (looked for swww, hyprpaper, feh)".into(),
             }
         };
         vec![ActionDecl {
             id: "wallpaper.apply".into(),
-            label: "Apply".into(),
-            needs_target: true,
             availability,
         }]
     }
@@ -259,10 +247,8 @@ impl Provider for WallpaperProvider {
         let target = target.cloned().unwrap_or(ApplyTarget::AllMonitors);
 
         if let Some(template) = &self.custom_command {
-            // The two placeholders cli-tui.md §8.2 fixes. `{item}` is always
-            // quoted by kith, because the template is run through a shell and the
-            // Item's name came from a peer: a wallpaper called `a; rm -rf ~` must
-            // arrive at that shell as one argument, not as two commands.
+            // Both placeholders are quoted: the template runs through a shell and
+            // the Item's name came from a peer.
             let filled = template
                 .replace("{item}", &shell_quote(&path.display().to_string()))
                 .replace(
@@ -315,8 +301,6 @@ mod tests {
 
     #[test]
     fn a_custom_command_gets_the_two_placeholders_the_config_documents() {
-        // cli-tui.md §8.2 fixes `{item}` and `{target}`; a template written from
-        // the spec has to be filled, not left with the literal braces in it.
         let p = WallpaperProvider::new(Some("set {item} on {target}".into()));
         assert!(p.custom_command.is_some());
         let filled = "set {item} on {target}"

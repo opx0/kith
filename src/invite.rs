@@ -1,67 +1,42 @@
 //! The Invite code — a time-bounded offer to join a Circle, printed as one line
-//! of ASCII.
+//! of ASCII a Person can paste or read aloud.
 //!
-//! An Invite is the only way into a Circle: there is no discovery, no directory,
-//! no public Circle. kith has no transport for one either (ROADMAP §5 — not a
-//! social network), so the artifact is deliberately *printable*: a Person pastes
-//! it into a channel they already trust, or reads it down a phone call. No QR,
-//! no `kith://` links in v0.1.
-//!
-//! ## The checksum is a checksum, not a signature
-//!
-//! The trailing CRC-32 catches a truncated paste, a mangled hyphen, a mail
-//! client that ate a line break. It proves **nothing** about who made the code
-//! and nothing about whether it has been tampered with — anyone can recompute a
-//! CRC. Nothing in this format needs to: the gate is a human approving a knock
-//! on their own Device, and ROADMAP §5 forbids home-grown cryptography, which is
-//! exactly what signing an Invite here would be.
-//!
-//! What a leaked code discloses is the Circle's id, the Steward's Device
-//! Identity and an expiry. Not content, not the Members, not who else was
-//! invited. And the code is a pointer, not a credential: whoever has read one can
-//! knock for as long as that Device exists, which is why v0.1 has expiry and no
-//! revoke (spec §3.2.4).
+//! The trailing CRC-32 is a checksum, not a signature: it catches a mangled
+//! paste and proves nothing about who made the code. The gate is a human
+//! approving a knock on their own Device.
 
 use crate::engine::{CircleId, DeviceId, InviteTicket};
 
-/// The literal prefix: `KITH` plus the format version, so a code from a future
-/// kith is detectable *before* anything is decoded.
+/// The literal prefix, so a code from a future kith is detectable *before*
+/// anything is decoded.
 const PREFIX: &str = "KITH";
 
 /// Format version. Single digit by construction — [`encode`] writes one
-/// character and [`decode`] reads one. A tenth format is a decision, not an
-/// accident, and it can spend the character it needs then.
+/// character and [`decode`] reads one.
 const VERSION: u8 = 1;
 
-/// Crockford base32: no `I`, `L`, `O` or `U`. The exclusions are the point —
-/// this is an artifact People read aloud, and Crockford lets the decoder undo
-/// the three substitutions a listener actually makes.
+/// Crockford base32: no `I`, `L`, `O` or `U`, so the decoder can undo the
+/// substitutions a listener makes.
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// Hyphen every eight characters, so a Person can keep their place while
-/// reading. Hyphens are cosmetic and stripped before decoding.
+/// Hyphen every eight characters. Cosmetic, and stripped before decoding.
 const GROUP: usize = 8;
 
-/// Five minutes of slack against clock skew between two Devices that have never
-/// agreed on anything, least of all the time (spec §3.4 step 3). The bound that
-/// matters is the invite *window*, checked on the Steward's own Device at
-/// approval time; this one is a courtesy that saves an invitee a pointless wait.
+/// Slack against clock skew between two Devices. The bound that matters is
+/// checked on the Steward's own Device at approval time.
 const CLOCK_SKEW_GRACE_SECS: i64 = 300;
 
-/// Why a code was refused. Four outcomes rather than one, because the CLI can
-/// say something genuinely different about each: fix the paste, ask for a fresh
-/// Invite, or upgrade kith.
+/// Why a code was refused — four outcomes, because the CLI can say something
+/// genuinely different about each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InviteError {
     /// Not an invite code at all, or damaged past recognition.
     #[error("that is not a kith invite code")]
     Malformed,
-    /// It looks like a code and does not add up — a character is wrong, or
-    /// something was cut off in transit.
+    /// It looks like a code and does not add up.
     #[error("the invite code arrived damaged — check nothing was cut off")]
     Checksum,
-    /// A well-formed code whose moment has passed. Ask for another; issuing one
-    /// takes the Steward a second.
+    /// A well-formed code whose moment has passed.
     #[error("this invite has expired")]
     Expired,
     /// A code from a kith that speaks a format this one does not.
@@ -71,32 +46,17 @@ pub enum InviteError {
 
 /// Render a ticket as the printed code.
 ///
-/// ```text
-/// KITH1-0400TTV9-EHM2TDTH-9MT5GJT3-68038GTP-B0T48N9K-…-EGS81W29-TXWG
-/// ```
-///
-/// The payload is length-prefixed rather than fixed-width because the two
-/// interesting fields are *opaque handles from below the seam* (ADR-0002 §1):
-/// kith does not know how the Sync Engine spells a Circle id or a Device
-/// Identity and must not learn, so it carries the bytes it was given instead of
-/// parsing them down to something shorter. A Device Identity is 32 irreducible
-/// bytes either way — it is the only thing that lets an invitee find the
-/// Steward's Device at all — so what this costs against spec §3.2.2's fixed
-/// layout is the handles' own spelling, around forty characters, and what it
-/// buys is the seam. The whole code stays a paste, not a passphrase.
-///
 /// | Offset | Size | Field |
 /// |---|---|---|
 /// | 0 | 1 | `version` |
 /// | 1 | 2 + N | Circle id, u16 big-endian length then UTF-8 |
 /// | … | 2 + N | Steward's Device Identity, same shape |
 /// | … | 8 | `expires_at`, unix seconds, u64 big-endian |
+/// | … | 2 + N | address hint, optional |
 /// | … | 4 | CRC-32 (IEEE) of everything above, big-endian |
 ///
-/// The seam's `InviteTicket` carries three fields in v0.1, so three are encoded.
-/// The Circle name, the nonce and the address hints spec §3.2.2 anticipates are
-/// not modelled above the seam yet; adding them is a version bump, which is what
-/// the version byte is for.
+/// Fields are length-prefixed rather than fixed-width because the ids are
+/// opaque handles from below the engine seam.
 pub fn encode(ticket: &InviteTicket) -> String {
     let mut payload = Vec::with_capacity(96);
     payload.push(VERSION);
@@ -125,25 +85,18 @@ pub fn encode(ticket: &InviteTicket) -> String {
 
 /// Read a printed code back into a ticket, against the system clock.
 ///
-/// Tolerant of everything a code survives on its way between two People:
-/// lowercase, missing or extra hyphens, wrapped lines, and the three
-/// substitutions a listener makes — `O` for `0`, `I` or `L` for `1`.
-///
-/// Nothing here touches the Sync Engine. A code is checked entirely locally, so
-/// an invitee learns a bad paste is bad without anybody being contacted.
+/// Tolerant of lowercase, missing or extra hyphens, wrapped lines and the
+/// substitutions a listener makes. Checked entirely locally.
 pub fn decode(code: &str) -> Result<InviteTicket, InviteError> {
     decode_at(code, jiff::Timestamp::now().as_second())
 }
 
 /// [`decode`] against a supplied clock, in unix seconds.
 ///
-/// Exists for tests, and for the one surface that needs a decoded-but-expired
-/// ticket: spec §3.4's `This invite expired 3h 12m ago` needs the expiry itself,
-/// which [`InviteError::Expired`] deliberately does not carry. Pass `0` to skip
-/// the expiry check and compare `expires_at` yourself.
+/// Pass `0` to skip the expiry check and compare `expires_at` yourself — the
+/// surface that reports how long ago an Invite lapsed needs the expiry, which
+/// [`InviteError::Expired`] does not carry.
 pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError> {
-    // Normalise first: strip the cosmetic hyphens and any whitespace a wrapped
-    // paste picked up, then uppercase.
     let normalised: String = code
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
@@ -154,10 +107,8 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
         .strip_prefix(PREFIX)
         .ok_or(InviteError::Malformed)?;
 
-    // The version is one character and it is read before anything else, so a
-    // future format is refused rather than misparsed. It sits outside the
-    // base32 body, so the confusable substitutions are undone by hand here —
-    // someone reading "kith one" aloud is heard as `KITHL` often enough.
+    // The version sits outside the base32 body, so its confusables are undone by
+    // hand here — "kith one" is typed back as `KITHL` often enough.
     let mut chars = rest.chars();
     let version = match chars.next().ok_or(InviteError::Malformed)? {
         'I' | 'L' => '1',
@@ -175,8 +126,8 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
     }
     let bytes = base32_decode(body)?;
 
-    // Split and check the CRC before reading a single field: a corrupted length
-    // prefix must be reported as damage, never chased into the payload.
+    // Check the CRC before reading a single field: a corrupted length prefix must
+    // be reported as damage, never chased into the payload.
     if bytes.len() < 4 {
         return Err(InviteError::Malformed);
     }
@@ -188,7 +139,7 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
 
     let mut reader = Reader::new(payload);
     // The prefix sits outside the checksum, so the version inside it is the
-    // authoritative one. Both are checked; they cannot disagree honestly.
+    // authoritative one.
     if reader.u8()? != VERSION {
         return Err(InviteError::WrongVersion);
     }
@@ -215,13 +166,9 @@ pub fn decode_at(code: &str, now_unix: i64) -> Result<InviteTicket, InviteError>
     })
 }
 
-// ── payload ──────────────────────────────────────────────────────────
-
 fn push_field(out: &mut Vec<u8>, bytes: &[u8]) {
-    // A field longer than u16::MAX cannot be represented. No engine mints an id
-    // remotely near that, and truncating fails safe: the resulting ticket points
-    // at no Device, so a knock never reaches anyone rather than reaching the
-    // wrong Device.
+    // Truncating past u16::MAX fails safe: the ticket then points at no Device
+    // rather than at the wrong one.
     let len = bytes.len().min(u16::MAX as usize);
     out.extend_from_slice(&(len as u16).to_be_bytes());
     out.extend_from_slice(&bytes[..len]);
@@ -268,8 +215,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-// ── Crockford base32 ─────────────────────────────────────────────────
-
 fn base32_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
     let mut acc: u32 = 0;
@@ -301,19 +246,16 @@ fn base32_decode(s: &str) -> Result<Vec<u8>, InviteError> {
             out.push(((acc >> bits) & 0xff) as u8);
         }
     }
-    // The tail may hold at most four bits of zero padding. Five or more means a
-    // character contributed nothing — something was added or lost — and a
-    // non-zero remainder means a character in the last group is wrong. Being
-    // strict here is what stops a corruption in the tail from slipping past the
-    // CRC unnoticed, because the tail never reaches it.
+    // The tail may hold at most four bits of zero padding. Being strict here is
+    // what stops tail corruption slipping past the CRC, which never sees it.
     if bits >= 5 || (acc & ((1u32 << bits) - 1)) != 0 {
         return Err(InviteError::Malformed);
     }
     Ok(out)
 }
 
-/// One character to its five bits, undoing the substitutions a Person makes when
-/// they read a code aloud. `U` is absent from the alphabet and stays absent.
+/// One character to its five bits, undoing the substitutions a Person makes
+/// reading a code aloud. `U` is absent from the alphabet and stays absent.
 fn symbol(c: char) -> Option<u8> {
     match c {
         'O' => Some(0),
@@ -325,11 +267,8 @@ fn symbol(c: char) -> Option<u8> {
     }
 }
 
-// ── CRC-32 (IEEE) ────────────────────────────────────────────────────
-
 /// Bitwise CRC-32, reflected polynomial `0xEDB88320` — the one every checksum
-/// tool means by "CRC32". Written out rather than pulled in: a dependency for
-/// eleven lines that run once per printed code is not a trade worth making.
+/// tool means by "CRC32".
 fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &b in data {
@@ -347,9 +286,8 @@ mod tests {
     use super::*;
 
     const CIRCLE: &str = "kith-7QM4XKC2";
-    /// Shaped like the seam's opaque Device handle: 52 base32 characters, in an
-    /// alphabet of its own that includes letters Crockford leaves out. The
-    /// payload carries it as bytes, so that is not this module's problem.
+    /// Shaped like the seam's opaque Device handle, in an alphabet of its own
+    /// that includes letters Crockford leaves out.
     const DEVICE: &str = "CVX4DU36QK7WN2ZPB5YHJFA3ETMRS6LXG4VC8DKQ9WNP2ZY7KQ4X";
     const EXPIRES: u64 = 1_786_000_000;
     /// An hour before the Invite lapses.
@@ -385,8 +323,7 @@ mod tests {
         assert_eq!(back.address, None);
     }
 
-    /// Replace the `nth` symbol of the body with a different one — the paste
-    /// that lost a character to a mail client, or the digit read back wrong.
+    /// Replace the `nth` symbol of the body with a different one.
     fn corrupt(code: &str, nth: usize) -> String {
         let (head, body) = code.split_once('-').expect("a grouped code");
         let mut out = String::from(head);
@@ -436,10 +373,8 @@ mod tests {
 
     #[test]
     fn a_code_read_aloud_and_typed_back_still_decodes() {
-        // Lowercase, hyphens lost to a chat window, a line wrapped in the
-        // middle, and the three substitutions a listener makes: O for zero, I
-        // and L for one — including in the `KITH1` prefix, which is heard as
-        // "kith one" and typed as `kithl`.
+        // Lowercase, hyphens lost, a wrapped line, and O/I/L substituted —
+        // including in the prefix, which is typed back as `kithl`.
         let code = encode(&ticket());
         let mangled: String = code
             .chars()
@@ -475,8 +410,6 @@ mod tests {
     #[test]
     fn a_truncated_paste_never_decodes_to_a_ticket() {
         let code = encode(&ticket());
-        // A mail client that ate the last line: damage, by one name or the
-        // other, and never a ticket.
         let cut = &code[..code.len() - 9];
         let err = decode_at(cut, NOW).unwrap_err();
         assert!(
@@ -553,13 +486,11 @@ mod tests {
 
     #[test]
     fn base32_refuses_a_body_that_could_not_have_been_encoded() {
-        // Two symbols is one byte plus two bits of zero padding.
+        // One byte plus two bits of zero padding.
         assert_eq!(base32_decode("00"), Ok(vec![0x00]));
-        // Three symbols is fifteen bits: one byte and seven left over, which no
-        // encoding of any payload produces.
+        // Fifteen bits: seven left over, which no encoding produces.
         assert_eq!(base32_decode("000"), Err(InviteError::Malformed));
-        // Padding bits must be zero, which is what catches a wrong character in
-        // the last group — the CRC never sees those bits.
+        // Padding bits must be zero — the CRC never sees them.
         assert_eq!(base32_decode("01"), Err(InviteError::Malformed));
         // U is not in the alphabet and is not a confusable for anything.
         assert_eq!(base32_decode("0U"), Err(InviteError::Malformed));

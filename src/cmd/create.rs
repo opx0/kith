@@ -1,35 +1,16 @@
 //! `kith create <name> [--path <dir>] [--adopt]` — a Circle comes into existence.
 //!
-//! Step 4 of the v0.1 walkthrough, and the only place in the binary where a
-//! Circle, its sole Collection and its founding Membership claim are written.
-//! The sequence is fixed by `docs/spec/circles-members-invites.md` §3.1:
-//!
-//! 1. require an Identity — attribution has to have somebody to attribute to;
-//! 2. resolve the root, and refuse to move into somebody else's directory;
-//! 3. `SyncEngine::create_circle` — allocate the replicated space;
-//! 4. seed the ignore file, *before* the first descriptor is staged beside it;
-//! 5. `.kith/circle.toml` — `founder_person` and `founder_device`;
-//! 6. `.kith/collections/main.toml` — this *is* the Collection's creation;
-//! 7. this Device's Membership claim, so the founder is nameable immediately.
-//!
-//! **`founder_device` is the Circle's memory of its Steward's Device**, and every
-//! surface reads it from there forever after — never from `PeerDevice.introducer`,
-//! which by ADR-0002 §3's own rule is set on nobody from the Steward's own vantage
-//! point. The one exception is the bootstrap in [`steward_peer`], which is used
-//! once, only when adopting a space that has no `circle.toml` yet, and only to
-//! decide whether to write one.
-//!
-//! **Every step is idempotent**, because a create that dies between the engine
-//! call and the descriptors would otherwise leave a Circle nobody can name and no
-//! command can finish. Re-running the same `kith create` picks up exactly where it
-//! stopped: a space the engine already replicates is kept, a descriptor already in
-//! the tree is read rather than rewritten (it is write-once, ADR-0004 §5), and a
-//! claim that already says the right thing is left alone.
+//! The order is fixed: Identity, root, `SyncEngine::create_circle`, ignore file,
+//! `.kith/circle.toml`, `.kith/collections/main.toml`, this Device's claim. The
+//! ignore file comes first because it teaches the engine to skip the staging
+//! suffix the next write uses. Every step is idempotent, so a create that died
+//! part-way is finished by running it again.
 
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::cmd::membership::fingerprint;
 use crate::config::Config;
 use crate::domain::ItemId;
 use crate::engine::syncthing::{Credentials, SyncthingEngine};
@@ -48,21 +29,16 @@ const EX_DATA: i32 = 65;
 const EX_UNAVAILABLE: i32 = 69;
 const EX_CONFIG: i32 = 78;
 
-/// v0.1's sole Collection id. Opaque in the format, a literal in exactly this
-/// module — the one that creates it (docs/spec/collections.md §8).
+/// v0.1's sole Collection id, a literal in the one module that creates it.
 const COLLECTION: &str = "main";
 
-/// The Provider this build binds a new Collection to. One Provider in v0.1.
+/// The Provider this build binds a new Collection to.
 const PROVIDER: &str = "wallpaper";
 
 /// `kith create` — returns this process's exit code.
 ///
-/// *Call recorded here:* a missing Identity exits **78**, the code this build's
-/// commands share for "this Device is not set up to do that yet". `cli-tui.md`
-/// §4.2 spells the same refusal 64; the binary's own exit table is what a script
-/// wrapping kith actually sees, so consistency across `create`, `add` and the
-/// membership verbs wins over the spec's local spelling. Nothing is written
-/// either way.
+/// A missing Identity exits 78, matching `add` and the membership verbs rather
+/// than cli-tui §4.2's local spelling of 64.
 pub async fn run(name: &str, path: Option<&str>, adopt: bool) -> i32 {
     let identity = match crate::identity::load() {
         Ok(Some(id)) => id,
@@ -104,8 +80,7 @@ pub async fn run(name: &str, path: Option<&str>, adopt: bool) -> i32 {
     }
 }
 
-/// Where to reach the Sync Engine: the Person's explicit override first,
-/// discovery second (ADR-0002 §6). kith reads credentials and never writes them.
+/// Where to reach the Sync Engine: the Person's override first, discovery second.
 fn credentials(config: &Config) -> Result<Credentials, SyncError> {
     let discovered = SyncthingEngine::discover();
     match (&config.engine_address, &config.engine_api_key) {
@@ -136,8 +111,7 @@ fn credentials(config: &Config) -> Result<Credentials, SyncError> {
 struct Made {
     circle: CircleRef,
     root: PathBuf,
-    /// The engine was already replicating this space — the wp-sync migration
-    /// path, where nothing is created and no bytes move (ADR-0002 §7).
+    /// The engine was already replicating this space; nothing was created.
     kept_space: bool,
     stewardship: Stewardship,
     /// `Some` only when `--adopt` ran the content pass.
@@ -148,11 +122,9 @@ struct Made {
 enum Stewardship {
     /// We wrote `circle.toml`, or it was already ours.
     Ours,
-    /// A descriptor was already in the tree naming another Device. We adopted
-    /// into it and left it exactly as found — it is write-once.
+    /// A descriptor already named another Device. Adopted into, left as found.
     Theirs(String),
-    /// No descriptor yet, and the engine says another Device is the one that
-    /// admits peers. Its `circle.toml` will arrive; kith writes none.
+    /// No descriptor yet, and the engine says another Device admits peers.
     Awaiting(String),
 }
 
@@ -165,16 +137,14 @@ async fn create<E: SyncEngine>(
 ) -> Result<Made, Fault> {
     let name = validate_name(name)?;
 
-    // Creating a Circle writes engine configuration; kith will not queue that,
-    // so both checks happen before anything at all is written.
+    // Both checks first: creating a Circle writes engine config, never queued.
     engine.health().await.map_err(Fault::Engine)?;
     let device = engine.local_device().await.map_err(Fault::Engine)?.0;
     let known = engine.circles().await.map_err(Fault::Engine)?;
 
     let (root, replicated) = resolve_root(&known, &name, path, adopt)?;
 
-    // A duplicate name is a refusal, not a rename — but re-running the same
-    // create against the same root is a resume, and must not trip over itself.
+    // A duplicate name is a refusal, not a rename; the same root again is a resume.
     if let Some(clash) = known
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(&name) && !same_path(&c.root, &root))
@@ -195,8 +165,7 @@ async fn create<E: SyncEngine>(
         ),
     };
 
-    // From here on a failure has to leave nothing behind: a half-made Circle is
-    // worse than none, because every read path would have to learn its shape.
+    // From here on a failure has to leave nothing behind.
     let finished = finish(engine, identity, &device, &circle, &root, adopt).await;
     match finished {
         Ok((stewardship, content)) => Ok(Made {
@@ -208,8 +177,7 @@ async fn create<E: SyncEngine>(
         }),
         Err(fault) => {
             if created_space {
-                // Undo step 2. Never for an adopted space: kith did not create
-                // it and does not dismantle what it did not create.
+                // Never for an adopted space, which kith did not create.
                 let _ = engine.leave(&circle.id).await;
             }
             if created_root {
@@ -229,35 +197,26 @@ async fn finish<E: SyncEngine>(
     root: &Path,
     adopt: bool,
 ) -> Result<(Stewardship, Option<Adoption>), Fault> {
-    // The seed comes first because it is what teaches the engine to ignore the
-    // `*.kith-tmp` staging file that the very next write uses. Seeding is
-    // additive and idempotent, so an adopted Circle keeps every line it had.
+    // First, because it teaches the engine to ignore the `*.kith-tmp` staging
+    // file the very next write uses. Seeding is additive and idempotent.
     //
-    // *Contract note.* The brief says "seed `.stignore` from `reserved_paths()`".
-    // Those globs are passed to the *scanner* below instead, which is what
-    // ADR-0002 §1 created them for: keeping engine artefacts out of the Gallery.
-    // Writing them here would also stop `*.sync-conflict-*` from replicating,
-    // and ADR-0002 §2 requires conflict copies to reach every Member so the
-    // Circle can handle them rather than hide them. What the ignore file gets is
-    // ADR-0002 §2's recipe exactly — `.kith/local` and `*.kith-tmp` — which
-    // `seed_stignore` writes unconditionally.
+    // The engine's reserved globs deliberately do *not* go in here: that would
+    // stop `*.sync-conflict-*` replicating, and a conflict copy has to reach
+    // every Member. They are passed to the scanner below instead.
     descriptors::seed_stignore(root, &[]).map_err(|e| Fault::Io(root.join(".stignore"), e))?;
 
     let existing = descriptors::read_circle(root)
         .map_err(|e| Fault::Io(descriptors::circle_path(root), e))?;
 
     let stewardship = match existing {
-        // Write-once (ADR-0004 §5): a descriptor already in the tree is read,
-        // never rewritten — including one we wrote ourselves a moment ago.
+        // Write-once: a descriptor already in the tree is read, never rewritten.
         Some(d) if d.founder_device == device => {
             ensure_collection(root)?;
             Stewardship::Ours
         }
         Some(d) => Stewardship::Theirs(d.founder_device),
         None => match steward_peer(engine, &circle.id).await? {
-            // Adopting a live wp-sync Circle whose admitting Device has not run
-            // kith yet: its descriptors will arrive, and two writers would be
-            // two claimants (docs/spec/collections.md §4.3).
+            // Its descriptors will arrive; two writers would be two claimants.
             Some(peer) => Stewardship::Awaiting(peer),
             None => {
                 write_descriptors(root, circle, identity, device)?;
@@ -266,8 +225,7 @@ async fn finish<E: SyncEngine>(
         },
     };
 
-    // Always, on every branch. A Device in a Circle with no claim of its own is
-    // an unclaimed Device — visible to everyone and nameable by nobody.
+    // Always, on every branch: a Device with no claim is nameable by nobody.
     claims::publish(root, device, identity, &now())
         .map_err(|e| Fault::Claim(root.join(".kith/members"), e))?;
 
@@ -280,8 +238,7 @@ async fn finish<E: SyncEngine>(
     Ok((stewardship, content))
 }
 
-/// Write the two singletons. Staged and renamed, so a failure leaves no partial
-/// record and nothing partial ever replicates (ADR-0004 §3).
+/// Write the two singletons, staged and renamed so nothing partial replicates.
 fn write_descriptors(
     root: &Path,
     circle: &CircleRef,
@@ -322,13 +279,8 @@ fn ensure_collection(root: &Path) -> Result<(), Fault> {
     .map_err(|e| Fault::Io(path, e))
 }
 
-/// The one legitimate read of `PeerDevice.introducer` in the whole product.
-///
-/// It answers a single bootstrap question — *before any kith metadata exists in
-/// this tree, which Device is the one the transport already admits peers
-/// through?* — and it is never consulted again: from the moment `circle.toml`
-/// exists, `founder_device` is the answer everywhere (ADR-0002 §3, §1's note on
-/// the flag being a cross-check only).
+/// The one legitimate read of `PeerDevice.introducer`: a bootstrap for a tree
+/// with no kith metadata. After that, `founder_device` is the answer everywhere.
 async fn steward_peer<E: SyncEngine>(
     engine: &E,
     circle: &CircleId,
@@ -350,8 +302,7 @@ fn resolve_root(
     path: Option<&str>,
     adopt: bool,
 ) -> Result<(PathBuf, Option<CircleRef>), Fault> {
-    // `--adopt <DIR>` in cli-tui §4.2 and `--path <DIR>` are the same argument
-    // here: this build's flag surface carries one path and a bare `--adopt`.
+    // `--adopt <DIR>` and `--path <DIR>` are the same argument here.
     let requested = match path {
         Some(p) => Some(std::path::absolute(p).map_err(|e| Fault::Io(PathBuf::from(p), e))?),
         None if adopt => None,
@@ -370,13 +321,8 @@ fn resolve_root(
     }
 }
 
-/// `~/kith/<slug>` (cli-tui §4.2).
-///
-/// *Gap noted.* `circles-members-invites.md` §3.1 puts the default at
-/// `$XDG_DATA_HOME/kith/circles/<slug>`; cli-tui §4.2 — which owns this verb's
-/// flag surface, and which `join`, `list circles` and `doctor` all echo — puts it
-/// at `~/kith/<slug>`. This build follows cli-tui: a Circle root is a directory
-/// of the Person's own wallpapers, and a Person has to be able to find it.
+/// `~/kith/<slug>`. circles §3.1 puts the default under `$XDG_DATA_HOME`; this
+/// build follows cli-tui, which `join`, `list circles` and `doctor` all echo.
 fn default_root(name: &str) -> Result<PathBuf, Fault> {
     let home = directories::BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
@@ -404,9 +350,7 @@ fn slug(name: &str) -> String {
 }
 
 /// Create the root if it is ours to create, and refuse to move into a directory
-/// that already belongs to somebody else.
-///
-/// Returns whether *this run* created it, which is what rollback needs to know.
+/// that already belongs to somebody else. Returns whether *this run* created it.
 fn prepare_root(root: &Path, device: &str, adopt: bool) -> Result<bool, Fault> {
     if adopt {
         if !root.is_dir() {
@@ -418,8 +362,7 @@ fn prepare_root(root: &Path, device: &str, adopt: bool) -> Result<bool, Fault> {
     match fs::read_dir(root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(root).map_err(|e| Fault::Io(root.to_path_buf(), e))?;
-            // 0700: a Circle's content is for its Members, not for the next
-            // account over on a shared machine.
+            // 0700: a Circle's content is for its Members, not the next account.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -432,8 +375,7 @@ fn prepare_root(root: &Path, device: &str, adopt: bool) -> Result<bool, Fault> {
             if entries.next().is_none() {
                 return Ok(false);
             }
-            // Not empty. The one thing that may still be ours is a Circle this
-            // command already started making here.
+            // Not empty — unless it is a Circle this command already started.
             match descriptors::read_circle(root) {
                 Ok(Some(d)) if d.founder_device == device => Ok(false),
                 Ok(Some(_)) | Ok(None) => Err(Fault::PathNotEmpty(root.to_path_buf())),
@@ -443,8 +385,7 @@ fn prepare_root(root: &Path, device: &str, adopt: bool) -> Result<bool, Fault> {
     }
 }
 
-/// Spaces the engine replicates that kith has never recorded anything in — a
-/// wp-sync install, waiting to be adopted rather than migrated (ADR-0002 §7).
+/// Spaces the engine replicates that kith has never recorded anything in.
 fn detect_adoptable(known: &[CircleRef]) -> Result<CircleRef, Fault> {
     let legacy = std::env::var("WP_FOLDER_ID").unwrap_or_else(|_| "wallpapers".to_string());
 
@@ -455,8 +396,7 @@ fn detect_adoptable(known: &[CircleRef]) -> Result<CircleRef, Fault> {
         .cloned()
         .collect();
 
-    // wp-sync's own space wins outright when it is there; it is the tree this
-    // flag exists for.
+    // wp-sync's own space wins outright; it is the tree this flag exists for.
     if let Some(c) = candidates.iter().find(|c| c.id.0 == legacy) {
         return Ok(c.clone());
     }
@@ -468,8 +408,7 @@ fn detect_adoptable(known: &[CircleRef]) -> Result<CircleRef, Fault> {
 }
 
 /// Two paths naming one directory. Canonicalised where the filesystem can say
-/// so, compared literally where it cannot — a Circle root that has not been
-/// created yet still has to match the one the engine remembers.
+/// so, literal where it cannot — a root not created yet still has to match.
 fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -491,22 +430,9 @@ struct Adoption {
 
 /// Record what is already in the tree, without touching a byte of it.
 ///
-/// This is docs/spec/collections.md §4.4: walk the Collection root, hash every
-/// Provider-claimed file, and append an `add` for anything no record names —
-/// with **`at` set to the file's modification time, not now** (ADR-0004 §4.5).
-/// That is the whole convergence trick: the engine preserves mtimes, so Ana's
-/// and Ben's records for the same file carry the same `at`, the alias tie-break
-/// reduces to the Device id, and both Devices reach one Item without talking.
-///
-/// The 60-second settle window (collections §6.5) does not apply here: a Person
-/// typed `--adopt`, which the spec makes the explicit "adopt it now" request.
-///
-/// *Honesty caveat, stated because a surface will have to repeat it:* ADR-0004
-/// marks these records `adopted: true` so Preview can say *found by Ana* rather
-/// than *added by Ana*. This build's `Record::Add` has no `adopted` field yet —
-/// it is reserved and unwritten (`store::records`) — so until it lands, adopted
-/// Items read as ordinary additions by whoever adopted them. The `at` is still
-/// the file's own mtime, so nothing claims they arrived today.
+/// `at` is the file's modification time, **not now**: the engine preserves
+/// mtimes, so two Devices adopting one tree write records that tie-break onto
+/// one Item. `--adopt` is explicit, so the settle window does not apply.
 fn adopt_content(
     root: &Path,
     device: &str,
@@ -515,8 +441,7 @@ fn adopt_content(
 ) -> Result<Adoption, Fault> {
     let provider = WallpaperProvider::default();
 
-    // Every hash the Circle already has a record for — ours from a previous run,
-    // and any peer's whose log has arrived. Re-running adopts nothing twice.
+    // Every hash the Circle already has a record for, ours or a peer's.
     let mut recorded: std::collections::BTreeSet<String> = records::read_all(root, COLLECTION)
         .map_err(|e| Fault::Io(root.join(".kith/items"), e))?
         .iter()
@@ -571,8 +496,7 @@ fn adopt_content(
             item: ItemId::generate(),
             by: identity.person.clone(),
             at,
-            // The stem, verbatim. Prettifying is a guess; the name is the
-            // Person's own (collections §3.3).
+            // The stem, verbatim. Prettifying is a guess; the name is theirs.
             title: title_of(&path),
             path: rel,
             hash,
@@ -587,12 +511,8 @@ fn adopt_content(
     Ok(found)
 }
 
-/// Every candidate file under the Collection root, depth-first, sorted.
-///
-/// Never walked, never hashed, never a tile (collections §1.4): `.kith/**` and
-/// every other dot-entry at any depth, everything the Sync Engine declares as
-/// its own, and symlinks — kith does not sync links, so it will not pretend one
-/// is an Item.
+/// Every candidate file under the Collection root, depth-first, sorted. Never
+/// walked: dot-entries at any depth, what the engine declares its own, symlinks.
 fn walk(root: &Path, reserved: &[&'static str]) -> io::Result<Vec<PathBuf>> {
     let mut queue = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -600,8 +520,7 @@ fn walk(root: &Path, reserved: &[&'static str]) -> io::Result<Vec<PathBuf>> {
     while let Some(dir) = queue.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            // A directory that vanished mid-walk is not a failed adoption, and
-            // one kith may not read is the Person's business, not an error.
+            // A directory that vanished mid-walk is not a failed adoption.
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => continue,
             Err(e) => return Err(e),
@@ -631,25 +550,18 @@ fn walk(root: &Path, reserved: &[&'static str]) -> io::Result<Vec<PathBuf>> {
         }
     }
 
-    // Byte-wise, so two runs over one tree see it in one order — and so do two
-    // Devices adopting the same tree.
+    // Byte-wise, so two runs — and two Devices — see one tree in one order.
     files.sort();
     Ok(files)
 }
 
-/// Whether a name matches one of the globs the Sync Engine owns.
-///
-/// The globs arrive from `SyncEngine::reserved_paths()` and are never spelled
-/// here — this function knows how to match a pattern and nothing about which
-/// patterns exist (ADR-0002 §1).
+/// Whether a name matches one of the Sync Engine's globs, never spelled here.
 fn is_reserved(name: &str, reserved: &[&'static str]) -> bool {
     reserved.iter().any(|glob| glob_match(glob, name))
 }
 
-/// `*` matches within one path segment, `**` across them, `?` matches one
-/// character that is not a separator. Enough for the globs the seam returns, and
-/// deliberately not a full ignore-file implementation — that belongs to the
-/// engine, which already has one.
+/// `*` matches within one path segment, `**` across them, `?` one character that
+/// is not a separator. Deliberately not a full ignore-file implementation.
 fn glob_match(pattern: &str, text: &str) -> bool {
     fn matches(p: &[u8], t: &[u8]) -> bool {
         match p.first() {
@@ -675,12 +587,8 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     matches(pattern.as_bytes(), text.as_bytes())
 }
 
-/// A bounded prefix, turned into a MIME guess for the Provider to judge.
-///
-/// 8 KiB is read but only the magic bytes are looked at; extension-less
-/// wallpapers are real in trees kith adopts, and an Item that syncs but is
-/// invisible is the worst outcome available (collections §1.4). A Provider that
-/// gets `None` still has its extension rule.
+/// A bounded prefix, turned into a MIME guess for the Provider to judge. An
+/// extension-less wallpaper is real in a tree kith adopts.
 fn sniff(path: &Path) -> Option<String> {
     let mut file = fs::File::open(path).ok()?;
     let mut buf = [0u8; 8192];
@@ -723,10 +631,6 @@ fn title_of(path: &Path) -> String {
 }
 
 /// A file's modification time as RFC 3339 — the `at` an adopted record carries.
-///
-/// A clock kith cannot read falls back to now, which costs the file its place in
-/// the date sort and costs convergence nothing: the alias rule still folds two
-/// Devices' records for identical bytes onto one Item.
 fn mtime(meta: &fs::Metadata) -> String {
     meta.modified()
         .ok()
@@ -791,8 +695,7 @@ impl Made {
                 println!(
                     "You are this Circle's Steward and its admin: invites and joins run on this Device."
                 );
-                // A Role is on screen, so the caveat is too — verbatim, per
-                // cli-tui §7.2. It goes to stderr: narration, not data.
+                // Verbatim, per cli-tui §7.2. stderr: narration, not data.
                 eprintln!("Roles are agreements, not enforcement — admission is the only gate.");
                 println!("Next: kith add <paths…>, then kith invite.");
             }
@@ -812,9 +715,7 @@ impl Made {
             }
         }
 
-        // Adoption does not touch wp-sync's automatic apply — kith deletes and
-        // disables nothing it did not create — but content arriving from a
-        // Circle must never change a screen, so the Person is told.
+        // Content arriving from a Circle must never change a screen.
         if self.content.is_some() && wp_sync_auto_apply_present() {
             eprintln!(
                 "! wp-sync's automatic wallpaper apply is still enabled — new wallpapers would change your screen without you asking."
@@ -841,23 +742,6 @@ fn pretty(path: &Path) -> String {
     }
 }
 
-/// The first eight characters of a Device Identity, grouped 4-4.
-///
-/// Enough to tell two Devices apart and to catch a transcription error; not
-/// enough to resist someone grinding a matching prefix, and no surface built on
-/// it may imply otherwise.
-fn fingerprint(device: &str) -> String {
-    let short: String = device
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect();
-    match short.len() {
-        0..=4 => short,
-        _ => format!("{}-{}", &short[..4], &short[4..]),
-    }
-}
-
 fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = n as f64;
@@ -875,8 +759,7 @@ fn bytes(n: u64) -> String {
 
 // ── failure ──────────────────────────────────────────────────────────
 
-/// Why the Circle was not made. Every variant fails before anything is written,
-/// or unwinds what was.
+/// Why the Circle was not made. Every variant fails before anything is written.
 #[derive(Debug)]
 enum Fault {
     BadName(&'static str),
@@ -898,7 +781,6 @@ impl Fault {
             Fault::AdoptAmbiguous(_) => EX_USAGE,
             Fault::AdoptNotFound | Fault::AdoptNotADirectory(_) => EX_DATA,
             Fault::NoHome => EX_CONFIG,
-            // ADR-0002 §1's categories, mapped by cli-tui §3.1.
             Fault::Engine(SyncError::Unreachable | SyncError::Incompatible(_)) => EX_UNAVAILABLE,
             Fault::Engine(SyncError::Unauthorized) => EX_CONFIG,
             Fault::Engine(SyncError::NotFound) => EX_DATA,
@@ -975,8 +857,7 @@ impl Fault {
     }
 }
 
-/// 1–64 characters, and something visible among them. A name is a display
-/// string; the `CircleId` is what has to be unique.
+/// 1–64 characters with something visible among them; the `CircleId` is unique.
 fn validate_name(name: &str) -> Result<String, Fault> {
     let name = name.trim();
     if name.is_empty() {
@@ -1008,9 +889,7 @@ mod tests {
 
     // ── a Sync Engine that is entirely ours ──────────────────────────
 
-    /// A test double for the seam. It is not a mock of a daemon — it is the
-    /// engine as the domain sees it, which is the whole point of ADR-0002's
-    /// firewall: this file can be tested without a daemon anywhere near it.
+    /// A test double for the seam — this file is tested with no daemon near it.
     struct FakeEngine {
         device: String,
         circles: Mutex<Vec<CircleRef>>,
@@ -1060,7 +939,6 @@ mod tests {
                 Some(SyncError::Unreachable) => Err(SyncError::Unreachable),
                 Some(e) => Err(SyncError::Engine(e.to_string())),
                 None => Ok(EngineHealth {
-                    reachable: true,
                     version: "2.0.4".into(),
                 }),
             }
@@ -1071,11 +949,8 @@ mod tests {
         }
 
         fn reserved_paths(&self) -> &[&'static str] {
-            // The *shapes* the real implementation answers with — a bare name, a
-            // subtree, a conflict-copy pattern, a temp-file pattern — spelled
-            // with words no engine has ever used. That is the point: this module
-            // cannot recognise them, so it cannot be quietly rewritten to know
-            // one, and the seam's own vocabulary stays behind the seam.
+            // The *shapes* the real implementation answers with, spelled with
+            // words no engine has ever used: this module cannot recognise them.
             &[
                 ".enginedir",
                 "archive/**",
@@ -1237,8 +1112,7 @@ mod tests {
         assert_eq!(people[0].display_name, "Ana");
         assert_eq!(people[0].devices, vec![ANA_DEVICE.to_string()]);
 
-        // The staging suffix the descriptor protocol uses is ignored from sync
-        // before the first descriptor is written.
+        // The staging suffix is ignored from sync before the first descriptor.
         let ignores = fs::read_to_string(root.join(".stignore")).unwrap();
         assert!(ignores.contains("(?d).kith/local"), "{ignores}");
         assert!(ignores.contains("(?d)*.kith-tmp"), "{ignores}");
@@ -1249,8 +1123,6 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    /// The whole point of the idempotency rule: a create that died between the
-    /// engine call and the descriptors is finished by running it again.
     #[tokio::test]
     async fn re_running_finishes_a_half_made_circle_without_making_a_second_one() {
         let base = scratch("resume");
@@ -1338,7 +1210,6 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    /// A half-made Circle is never left behind (circles spec §3.1, Rollback).
     #[tokio::test]
     async fn a_failed_descriptor_write_undoes_the_space_it_just_created() {
         let base = scratch("rollback");
@@ -1451,8 +1322,7 @@ mod tests {
         png(&root.join("sunset.engine-conflict-20260807-091402-K5J2FVL.png"));
         png(&root.join(".engine.sunset.png.tmp"));
         fs::write(root.join("notes.txt"), "not a wallpaper").unwrap();
-        // An extension-less wallpaper: found by its magic bytes, because an Item
-        // that syncs but is invisible is the worst outcome available.
+        // An extension-less wallpaper, found by its magic bytes.
         png(&root.join("bare-image"));
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("sunset.png"), root.join("link.png")).unwrap();
@@ -1483,9 +1353,6 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    /// docs/spec/collections.md §4.3: before any kith metadata exists, the Device
-    /// the transport already admits peers through is the one that writes the
-    /// descriptors. Every other adopting Device writes its claim and waits.
     #[tokio::test]
     async fn adopting_beside_a_peer_that_admits_joins_writes_no_descriptor() {
         let base = scratch("adopt-member");
@@ -1634,6 +1501,6 @@ mod tests {
     #[test]
     fn a_fingerprint_is_eight_characters_grouped_four_and_four() {
         assert_eq!(fingerprint(ANA_DEVICE), "P56I-OI7M");
-        assert_eq!(fingerprint("abc"), "abc");
+        assert_eq!(fingerprint("abc"), "ABC");
     }
 }

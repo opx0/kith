@@ -1,32 +1,21 @@
 //! The TUI — the app loop, the frame, and the routing between screens.
 //!
-//! Per `docs/spec/cli-tui.md` §6. Four things here are load-bearing rather than
-//! structural bookkeeping:
+//! Four things here are load-bearing:
 //!
-//! 1. **The terminal is restored on every exit path.** Normal quit, `Ctrl-C`, an
-//!    error return and a panic all go through the same [`Restore`] guard, and
-//!    `ratatui::try_init` installs a panic hook on top of it. A TUI that leaves a
-//!    wrecked terminal behind is the first thing a Person will hate, and it is
-//!    the one failure they cannot recover from inside kith.
+//! 1. **The terminal is restored on every exit path** — quit, `Ctrl-C`, an error
+//!    return and a panic all go through the [`Restore`] guard.
 //! 2. **Apply is constructed in a key handler and nowhere else.** [`Cmd::Apply`]
-//!    appears exactly twice in this file, both inside [`App::on_key`]'s call
-//!    tree. [`App::on_sync`] and [`App::on_tick`] return `()` by signature, so
-//!    arriving content cannot reach the Provider even by mistake. That is
-//!    ADR-0003's "Apply is always deliberate" made greppable rather than
-//!    promised.
+//!    appears exactly twice, both inside [`App::on_key`]'s call tree.
+//!    [`App::on_sync`] and [`App::on_tick`] return `()` by signature, so arriving
+//!    content cannot reach the Provider even by mistake.
 //! 3. **Arrival never moves the selection.** Sync events call
 //!    [`gallery::Gallery::update`], which is anchored to a tile key rather than
-//!    an index. Pressing `a` applies what was under the cursor when the Person
+//!    an index, so pressing `a` applies what was under the cursor when the Person
 //!    decided to press it.
-//! 4. **The engine is optional the whole way down.** A Person with no reachable
-//!    Sync Engine still browses, previews, favourites and applies off the tree;
-//!    the status row carries the reason. Nothing in this loop awaits the daemon
-//!    inline — every engine question is spawned and answered through the event
-//!    channel, so a hung daemon cannot freeze a keystroke.
-//!
-//! The v0.1 screen budget is closed at three screens (Gallery, Preview, Members)
-//! plus the Members screen's own pending-join prompt, with six overlays. Nothing
-//! else ships.
+//! 4. **The engine is optional the whole way down.** With no reachable Sync
+//!    Engine a Person still browses, previews, favourites and applies off the
+//!    tree. No engine question is awaited inline, so a hung daemon cannot freeze
+//!    a keystroke.
 
 pub mod gallery;
 pub mod members;
@@ -72,12 +61,12 @@ const EX_OK: i32 = 0;
 const EX_USAGE: i32 = 64;
 const EX_INTERNAL: i32 = 70;
 
-/// The Gallery cannot draw below this, and §4.11 refuses before the alternate
-/// screen is entered rather than painting a message over the Person's terminal.
+/// The Gallery cannot draw below this, and kith refuses before entering the
+/// alternate screen rather than painting a message that vanishes with it.
 const MIN_W: u16 = 60;
 const MIN_H: u16 = 18;
 
-/// How long a transient line holds the status row before it reverts (§6.1).
+/// How long a transient line holds the status row before it reverts.
 const STATUS_HOLD: Duration = Duration::from_secs(4);
 
 /// The tick. Fast enough for a progress figure, slow enough to cost nothing.
@@ -90,14 +79,15 @@ const ENGINE_REFRESH: Duration = Duration::from_secs(2);
 /// by that change have somewhere to land.
 const SETTLE: Duration = Duration::from_secs(3);
 
+/// How long arrivals are allowed to pile up before the Circle is re-read. The
+/// engine reports one path at a time; a Person perceives a batch.
+const RELOAD_COALESCE: Duration = Duration::from_millis(250);
+
 // ── entry ────────────────────────────────────────────────────────────
 
 /// Bare `kith`. Returns the process exit code; never calls `exit` itself, so the
 /// terminal guard runs.
 pub async fn run() -> i32 {
-    // §4.11's preconditions, all checked *before* the alternate screen is
-    // entered. A refusal painted onto the alternate screen is a refusal nobody
-    // reads: it vanishes with the screen it was written on.
     let me = match crate::identity::load() {
         Ok(Some(id)) => id,
         Ok(None) => {
@@ -124,10 +114,8 @@ pub async fn run() -> i32 {
         }
     }
 
-    // The config is inspected, never `load`ed: `load` exits the process on a bad
-    // file, and an exit from inside the alternate screen would not restore the
-    // terminal. Here we are still outside it, but the habit is the point — this
-    // value is carried into the loop.
+    // Inspected, never `load`ed: `load` exits the process on a bad file, and an
+    // exit from inside the alternate screen would not restore the terminal.
     let (config_warnings, config) = match config::inspect() {
         Ok(loaded) => (loaded.warnings(), loaded),
         Err(e) => {
@@ -139,14 +127,12 @@ pub async fn run() -> i32 {
         }
     };
 
-    // Credentials and the Circle list are the two things only the engine knows.
     // Neither is required: a Circle kith has a root for is browsable with the
-    // daemon stopped, which is ADR-0002 §6's promise.
+    // daemon stopped.
     let engine = engine_from(&config.config).map(Arc::new);
     let circles = discover_circles(engine.as_deref()).await;
-    // This Device's Identity *is* the Sync Engine's device id — kith mints no
-    // second ID space — so it is asked for while the daemon is answering and
-    // remembered, which is what lets a record still be appended with it stopped.
+    // This Device's Identity *is* the Sync Engine's device id, asked for while
+    // the daemon answers and remembered so a record can be appended without it.
     let device = match &engine {
         Some(e) => e.local_device().await.ok().map(|d| d.0),
         None => None,
@@ -159,8 +145,7 @@ pub async fn run() -> i32 {
             return EX_INTERNAL;
         }
     };
-    // Belt and braces: `try_init` installs a panic hook, and this guard covers
-    // every ordinary return out of `run`, including the `?`-shaped ones.
+    // `try_init` installs a panic hook; this guard covers ordinary returns.
     let _restore = Restore;
 
     let picker = detect_rung();
@@ -184,21 +169,11 @@ pub async fn run() -> i32 {
 /// Work out which rung of the preview ladder this terminal is on — and refuse to
 /// ask a terminal that will not answer.
 ///
-/// The detection query has to happen after the alternate screen is entered and
-/// before any key is read, because its answers arrive on stdin and would
-/// otherwise be delivered to the event loop as keystrokes. The trap is what
-/// happens when nothing answers: the query runs on a thread that reads stdin
-/// until it sees a Device Status Report, and a terminal that reports nothing
-/// leaves that thread parked on stdin forever, swallowing **every key the Person
-/// types**. That is not a degraded Gallery, it is a wedged one — and it is
-/// exactly what happens under a bare pty, a recording harness, or a terminal
-/// whose escape handling is off.
-///
-/// So kith asks a cheaper question first. `cursor::position()` writes one report
-/// request and waits, bounded, on the main thread — nothing is left behind if it
-/// times out. A terminal that answers it will answer the rest; one that does not
-/// never gets asked, and lands on halfblocks. Halfblocks is the shipped fallback,
-/// never a failure (ADR-0001 §8): kith is never unusable because of a terminal.
+/// `from_query_stdio` parks a thread on stdin until it sees a Device Status
+/// Report, so a terminal that reports nothing (a bare pty, a recording harness)
+/// leaves that thread swallowing every key the Person types. `cursor::position()`
+/// asks the same question bounded and on the main thread: a terminal that answers
+/// it will answer the rest, and one that does not lands on halfblocks.
 fn detect_rung() -> Picker {
     match crossterm::cursor::position() {
         Ok(_) => Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
@@ -215,11 +190,8 @@ impl Drop for Restore {
     }
 }
 
-/// The production engine, honouring the config's override before discovery.
-///
-/// This is the only place in the TUI that names the adapter type; the seam is
-/// not object-safe, so the concrete type has to be spelled once. Nothing below
-/// this line knows what is behind it.
+/// The production engine, honouring the config's override before discovery. The
+/// only place in the TUI that names the adapter type.
 fn engine_from(config: &Config) -> Option<SyncthingEngine> {
     if let (Some(address), Some(key)) = (&config.engine_address, &config.engine_api_key) {
         return Some(SyncthingEngine::new(crate::engine::syncthing::Credentials {
@@ -233,8 +205,8 @@ fn engine_from(config: &Config) -> Option<SyncthingEngine> {
 
 // ── the Circles this Device holds ────────────────────────────────────
 
-/// One Circle, as the app needs it: an id to ask the engine about and a root to
-/// read from. The root is what makes the daemon optional.
+/// An id to ask the engine about and a root to read from. The root is what makes
+/// the daemon optional.
 #[derive(Clone, Debug)]
 struct CircleHandle {
     id: CircleId,
@@ -242,8 +214,8 @@ struct CircleHandle {
     root: PathBuf,
 }
 
-/// Every Circle this Device is in — the engine's answer, plus the default
-/// location on disk so a stopped daemon does not empty the switcher.
+/// The engine's answer, plus the default location on disk so a stopped daemon
+/// does not empty the switcher.
 async fn discover_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<CircleHandle> {
     let mut out: Vec<CircleHandle> = Vec::new();
     if let Some(engine) = engine
@@ -261,9 +233,8 @@ async fn discover_circles<E: SyncEngine>(engine: Option<&E>) -> Vec<CircleHandle
             if !root.is_dir() || out.iter().any(|c| c.root == root) {
                 continue;
             }
-            // Only a directory kith actually wrote a Circle descriptor into is a
-            // Circle. Anything else in there is somebody's stray directory, and
-            // guessing it into the switcher would be kith inventing Membership.
+            // Only a directory kith wrote a Circle descriptor into is a Circle;
+            // guessing at the rest would be kith inventing Membership.
             let Ok(Some(d)) = descriptors::read_circle(&root) else {
                 continue;
             };
@@ -284,8 +255,7 @@ fn default_circles_dir() -> Option<PathBuf> {
 /// Everything the app reads off a Circle root in one pass, on a blocking task.
 ///
 /// Derived, never authoritative: the record logs and the Membership claims are
-/// the source of truth (ADR-0004 §1), and this is a reduction of them held for
-/// as long as it takes to draw a frame.
+/// the source of truth, and this is a reduction of them.
 #[derive(Default)]
 struct Tree {
     items: Vec<Item>,
@@ -294,8 +264,7 @@ struct Tree {
     collection: String,
     founder_person: Option<PersonId>,
     founder_device: Option<String>,
-    /// Bytes in the Circle that no record names yet — a Member's content landing
-    /// ahead of their log (gallery spec §4.1).
+    /// Bytes in the Circle that no record names yet.
     arriving: Vec<PathBuf>,
     /// Something in the tree could not be read. Shown, never swallowed.
     trouble: Option<String>,
@@ -336,12 +305,9 @@ fn read_tree(root: &Path, reserved: &[&'static str]) -> Tree {
     tree
 }
 
-/// Bytes present in the Circle that no live record binds.
-///
-/// The walk skips dot-entries at every depth (which is `.kith` and the engine's
-/// own bookkeeping) and everything `reserved_paths()` names, so no engine
-/// artefact is ever offered to a Person as content and no engine spelling
-/// appears in this module.
+/// Bytes present in the Circle that no live record binds. Dot-entries and
+/// everything `reserved_paths()` names are skipped, so no engine artefact is ever
+/// offered to a Person as content.
 fn arriving_paths(root: &Path, reserved: &[&'static str], items: &[Item]) -> Vec<PathBuf> {
     let bound: HashSet<PathBuf> = items.iter().filter_map(|i| i.path.clone()).collect();
     let mut out = Vec::new();
@@ -351,8 +317,7 @@ fn arriving_paths(root: &Path, reserved: &[&'static str], items: &[Item]) -> Vec
 }
 
 fn walk(dir: &Path, reserved: &[&'static str], bound: &HashSet<PathBuf>, out: &mut Vec<PathBuf>, depth: u32) {
-    // A Collection is a flat-ish tree in v0.1; the cap keeps a symlink loop or a
-    // pathological import from turning a redraw into a filesystem crawl.
+    // The cap keeps a symlink loop from turning a redraw into a filesystem crawl.
     if depth > 8 || out.len() > 5000 {
         return;
     }
@@ -401,7 +366,7 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 // ── events ───────────────────────────────────────────────────────────
 
 /// Everything the loop can be woken by. One channel, so ordering is total and
-/// there is no `select!` race between a keystroke and an arrival.
+/// there is no race between a keystroke and an arrival.
 enum Event {
     Key(KeyEvent),
     Resize,
@@ -427,12 +392,10 @@ struct Decoded {
     note: Option<String>,
 }
 
-/// A dedicated OS thread, because `crossterm`'s event stream is behind a feature
-/// this build does not carry and a blocking read cannot live on the runtime.
-///
-/// It polls rather than blocking outright so `stop` is honoured: a detached
-/// thread still sitting in `read()` after the terminal is restored would eat the
-/// Person's next keystroke at their shell.
+/// A dedicated OS thread, because a blocking read cannot live on the runtime. It
+/// polls rather than blocks so `stop` is honoured: a thread still sitting in
+/// `read()` after the terminal is restored would eat the next keystroke at the
+/// Person's shell.
 fn spawn_input(tx: UnboundedSender<Event>, stop: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
@@ -471,9 +434,8 @@ fn spawn_ticker(tx: UnboundedSender<Event>) {
     });
 }
 
-/// The live change feed. `Desynced` is forwarded rather than swallowed — the
-/// Person is told the feed lost continuity and the tree is re-read, which is
-/// ADR-0002 §5's rule and the opposite of leaving them looking at stale tiles.
+/// The live change feed. `Desynced` is forwarded rather than swallowed: the
+/// Person is told the feed lost continuity and the tree is re-read.
 fn spawn_observer<E: SyncEngine>(engine: Arc<E>, tx: UnboundedSender<Event>) {
     tokio::spawn(async move {
         let Ok(mut changes) = engine.observe(None).await else {
@@ -500,8 +462,8 @@ enum Screen {
     Members,
 }
 
-/// At most one is open at a time (§6.2). An overlay shadows the screen and the
-/// global layer both, which is why the join prompt is never raised over one.
+/// At most one is open at a time. An overlay shadows the screen and the global
+/// layer both, which is why the join prompt is never raised over one.
 enum Overlay {
     Help,
     Circles { sel: usize },
@@ -513,20 +475,17 @@ enum Overlay {
 
 struct Entry {
     action: ItemAction,
-    /// `None` means available. An unavailable Action is greyed **with its
-    /// reason**, never omitted (ADR-0003 §3).
+    /// `None` means available. An unavailable Action is greyed with its reason.
     refusal: Option<String>,
 }
 
-/// A destructive act, and the sentence that names its consequence.
-///
-/// `Enter` is the safe answer here, always: a confirm whose default deletes is a
-/// confirm that will one day delete by accident (§6.3 rule 4).
+/// A destructive act, and the sentence that names its consequence. `Enter` is
+/// always the safe answer: a confirm whose default deletes will one day delete
+/// by accident.
 struct Confirm {
     title: String,
     body: Vec<String>,
-    /// Typed confirmation, when `y` is not friction enough — leaving a Circle
-    /// asks for its name (circles spec §3.9.1).
+    /// Typed confirmation, when `y` is not friction enough.
     typed: Option<(String, String)>,
     yes: Cmd,
 }
@@ -554,9 +513,8 @@ enum Cmd {
 
 struct App<E: SyncEngine> {
     me: Identity,
-    /// The whole config, not just its flat five: the monitor picker needs the
-    /// friendly labels a Person gave their outputs (cli-tui.md §8.2), which do
-    /// not fit on `Config`.
+    /// The whole config: the monitor picker needs the labels a Person gave their
+    /// outputs, which do not fit on `Config`.
     config: config::Loaded,
     provider: Arc<WallpaperProvider>,
     picker: Picker,
@@ -592,6 +550,9 @@ struct App<E: SyncEngine> {
     status: Option<(String, Instant)>,
     last_failure: Option<String>,
     last_engine_refresh: Instant,
+    reload_after: Option<Instant>,
+    reload_in_flight: bool,
+    backends: Vec<&'static str>,
     /// Redraw on tick until this moment, and not after (see [`App::on_tick`]).
     settle_until: Instant,
     dirty: bool,
@@ -613,14 +574,15 @@ impl<E: SyncEngine> App<E> {
     ) -> Self {
         let rung = Rung::from_protocol(picker.protocol_type());
         let provider = Arc::new(WallpaperProvider::new(config.config.apply_command.clone()));
+        // Detected once: asking walked $PATH on every frame.
+        let backends = provider.detected();
         let mut state = State::load();
         if device.is_some() {
             state.device = device;
         }
 
-        // The TUI opens on `last_circle` — the opposite of the CLI, which never
-        // guesses from history (§1.3). A TUI has a visible, switchable context
-        // and a script invocation does not.
+        // The TUI opens on `last_circle`, unlike the CLI: a TUI has a visible,
+        // switchable context and a script invocation does not.
         let active = if circles.is_empty() {
             None
         } else {
@@ -672,6 +634,9 @@ impl<E: SyncEngine> App<E> {
             status: None,
             last_failure: None,
             last_engine_refresh: Instant::now() - ENGINE_REFRESH,
+            reload_after: None,
+            reload_in_flight: false,
+            backends,
             settle_until: Instant::now() + SETTLE,
             dirty: true,
             quit: false,
@@ -680,8 +645,7 @@ impl<E: SyncEngine> App<E> {
         for w in warnings {
             app.say(w);
         }
-        // The one `warn` the preview cache can raise. Said out loud rather than
-        // discovered as a grid that redecodes every scroll.
+        // The one `warn` the preview cache can raise.
         if let Some(warning) = app.gallery.cache_warning().map(str::to_string) {
             app.say(warning);
         }
@@ -760,8 +724,12 @@ impl<E: SyncEngine> App<E> {
             Change::Knock { .. } => self.refresh_engine_facts(),
             Change::Presence { .. } => self.refresh_engine_facts(),
             Change::Path { circle, .. } => {
+                // The engine emits one of these per file, so a sync of 500
+                // Items would otherwise cost 500 full tree walks and as many
+                // rounds of engine questions. Coalesce instead: note that a
+                // reload is owed and let the tick decide when to pay it.
                 if self.active_circle().map(|c| c.id == circle).unwrap_or(false) {
-                    self.load_circle();
+                    self.reload_after = Some(Instant::now() + RELOAD_COALESCE);
                 }
             }
         }
@@ -779,12 +747,16 @@ impl<E: SyncEngine> App<E> {
         if self.last_engine_refresh.elapsed() >= ENGINE_REFRESH {
             self.refresh_engine_facts();
         }
-        // The thumbnail pool finishes decodes off the loop, and a redraw is the
-        // only way they reach the screen — but only for a settling window after
-        // something actually changed. A tick that redrew forever would keep
-        // re-transmitting every image on the kitty and iTerm2 rungs four times a
-        // second, for a Gallery nobody is touching (§6.2: the tick fires only
-        // while something on screen is still moving).
+        if let Some(due) = self.reload_after
+            && Instant::now() >= due
+            && !self.reload_in_flight
+        {
+            self.reload_after = None;
+            self.load_circle();
+        }
+        // A redraw is the only way a finished decode reaches the screen — but
+        // only while something is still moving. A tick that redrew forever would
+        // re-transmit every image four times a second on the pixel rungs.
         if Instant::now() < self.settle_until
             && !matches!(self.stack.last(), Some(Screen::Members))
         {
@@ -798,11 +770,11 @@ impl<E: SyncEngine> App<E> {
         self.settle_until = Instant::now() + SETTLE;
     }
 
-    // ── keys: overlay → screen → global (§6.2) ───────────────────────
+    // ── keys: overlay → screen → global ──────────────────────────────
 
     fn on_key(&mut self, key: KeyEvent) -> Option<Cmd> {
-        // `Ctrl-C` is the one key nothing may shadow: it is the way out of a
-        // wedged overlay, and a Person reaching for it is already unhappy.
+        // `Ctrl-C` is the one key nothing may shadow: the way out of a wedged
+        // overlay.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Cmd::Quit);
         }
@@ -872,8 +844,6 @@ impl<E: SyncEngine> App<E> {
     }
 
     fn members_key(&mut self, key: KeyEvent) -> Option<Cmd> {
-        // `L` leaves, and the confirm is typed rather than a `y` — the one
-        // irreversible social act v0.1 has.
         if let Some(action) = self.members.handle_key(key) {
             return match action {
                 MembersAction::Approve(r) => Some(Cmd::Approve(r)),
@@ -938,7 +908,7 @@ impl<E: SyncEngine> App<E> {
                 None
             }
             KeyCode::Char('y') => item.map(Cmd::CopyPath),
-            // §6.3 rule 6: an unbound key says so rather than doing nothing.
+            // An unbound key says so rather than doing nothing.
             KeyCode::Char(c) if !c.is_control() => {
                 self.say(format!("no binding for '{c}' — press ? for keys"));
                 None
@@ -1068,12 +1038,9 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// Apply: raise the monitor picker when there is more than one target, and
-    /// apply straight away when there is exactly one.
-    ///
-    /// Targets are the Provider's, widened by the outputs the Person named in
-    /// their config (§8.2) — a backend that reports only "all monitors" still
-    /// gets a picker when its owner has told kith what their monitors are called.
+    /// Raise the monitor picker when there is more than one target, and apply
+    /// straight away when there is exactly one. Targets are the Provider's,
+    /// widened by the outputs the Person named in their config.
     fn ask_apply(&mut self, item: ItemId) -> Option<Cmd> {
         let Some(it) = self.item(&item).cloned() else {
             return Some(Cmd::Refuse("that Item is no longer in this Collection.".into()));
@@ -1100,14 +1067,13 @@ impl<E: SyncEngine> App<E> {
         targets
     }
 
-    /// Why Apply cannot run here, if it cannot. Two sources: the Provider (no
-    /// backend, §6.8) and the Person's own config naming a backend that is not
-    /// installed — never a silent fallback to a different one.
+    /// Why Apply cannot run here, if it cannot: no backend, or a config naming
+    /// one that is not installed — never a silent fallback to a different one.
     fn apply_refusal(&self, item: &Item) -> Option<String> {
         if item.path.is_none() {
             return Some("the bytes for this Item have not arrived yet".into());
         }
-        if let Some(refusal) = self.config.config.backend_refusal(&self.provider.detected()) {
+        if let Some(refusal) = self.config.config.backend_refusal(&self.backends) {
             return Some(refusal);
         }
         self.provider.actions(item).into_iter().find_map(|d| match d.availability {
@@ -1200,11 +1166,8 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// Apply, on this Device and nowhere else.
-    ///
-    /// Nothing is written into the Circle and nothing is announced: a Person's
-    /// screen is theirs, and the whole point of the product is that a Member
-    /// adding a wallpaper cannot change it.
+    /// Apply, on this Device and nowhere else. Nothing is written into the Circle
+    /// and nothing is announced: a Person's screen is theirs.
     async fn apply(&mut self, id: ItemId, target: Option<ApplyTarget>) {
         let Some(item) = self.item(&id).cloned() else { return };
         self.gallery.mark_seen(&id);
@@ -1224,8 +1187,7 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// A Favourite is this Person's, on this Device. Nothing crosses the seam
-    /// and nobody is told (ADR-0002 §2).
+    /// A Favourite is this Person's, on this Device. Nobody is told.
     fn toggle_favourite(&mut self, id: &ItemId) {
         let Some(circle) = self.active_circle().cloned() else { return };
         let now_favourite = !self.favourites.contains(id);
@@ -1278,8 +1240,8 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// Delete: a tombstone appended to this Device's own log, which every Member
-    /// reduces to the same answer. The bytes are the engine's to propagate.
+    /// A tombstone appended to this Device's own log, which every Member reduces
+    /// to the same answer. The bytes are the engine's to propagate.
     fn delete(&mut self, id: &ItemId) {
         let (Some(circle), Some(device)) = (self.active_circle().cloned(), self.device_id())
         else {
@@ -1293,8 +1255,8 @@ impl<E: SyncEngine> App<E> {
         };
         match records::append(&circle.root, &self.collection, &device, &record) {
             Ok(()) => {
-                // The bytes are removed too: a tombstone with the file still
-                // sitting there would be re-adopted by the next scan.
+                // A tombstone with the file still there would be re-adopted by
+                // the next scan.
                 if let Some(item) = self.item(id)
                     && let Some(path) = item.path.clone()
                 {
@@ -1311,9 +1273,8 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// Admission — the one real gate. It has already been confirmed by hand on
-    /// the Members screen, and it is the only thing in this loop that changes
-    /// what another Device may receive.
+    /// Admission — the one real gate, and the only thing in this loop that
+    /// changes what another Device may receive.
     async fn approve(&mut self, request: JoinRequest) {
         let (Some(engine), Some(circle)) = (self.engine.clone(), self.active_circle().cloned())
         else {
@@ -1330,8 +1291,8 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    /// A rejection is local and silent. There is no server to deliver a "no",
-    /// and kith will not pretend it sent one.
+    /// Local and silent: there is nothing to deliver a "no", and kith will not
+    /// pretend it sent one.
     fn reject(&mut self, request: JoinRequest) {
         let Some(circle) = self.active_circle().cloned() else { return };
         crate::cmd::membership::dismiss(
@@ -1350,8 +1311,8 @@ impl<E: SyncEngine> App<E> {
             self.say(ENGINE_DOWN.into());
             return;
         };
-        // The claim is stamped before the engine is told: once replication
-        // stops, nothing this Device writes reaches anybody.
+        // Stamped before the engine is told: once replication stops, nothing
+        // this Device writes reaches anybody.
         if let Some(device) = self.device_id() {
             let _ = claims::stamp_left(&circle.root, &device, &jiff::Timestamp::now().to_string());
         }
@@ -1385,8 +1346,7 @@ impl<E: SyncEngine> App<E> {
         ratatui::restore();
         #[cfg(unix)]
         {
-            // SIGSTOP. One libc symbol does not earn a crate dependency, and
-            // `store::records` already sets this precedent for `flock`.
+            // One libc symbol does not earn a crate dependency.
             const SIGSTOP: i32 = 19;
             unsafe extern "C" {
                 fn raise(sig: i32) -> i32;
@@ -1418,6 +1378,10 @@ impl<E: SyncEngine> App<E> {
             self.engine.as_ref().map(|e| e.reserved_paths().to_vec()).unwrap_or_default();
         let root = circle.root.clone();
         let tx = self.tx.clone();
+        // One walk at a time. Without this a burst of arrivals would put
+        // hundreds of concurrent tree walks on the blocking pool, all racing to
+        // describe the same directory.
+        self.reload_in_flight = true;
         tokio::task::spawn_blocking(move || {
             let tree = read_tree(&root, &reserved);
             let _ = tx.send(Event::Tree(Box::new(tree)));
@@ -1426,6 +1390,7 @@ impl<E: SyncEngine> App<E> {
     }
 
     fn adopt_tree(&mut self, tree: Tree) {
+        self.reload_in_flight = false;
         let Some(circle) = self.active_circle().cloned() else { return };
         if let Some(trouble) = &tree.trouble {
             self.fail(trouble.clone());
@@ -1437,8 +1402,7 @@ impl<E: SyncEngine> App<E> {
         self.founder_person = tree.founder_person;
         self.founder_device = tree.founder_device;
 
-        // Anything this Device has never been shown is unseen. An Item added
-        // here is seen by construction — it was on screen when it was added.
+        // Anything this Device has never been shown is unseen.
         let seen: HashSet<String> =
             self.state.seen.get(&circle.id.0).cloned().unwrap_or_default().into_iter().collect();
         self.unseen =
@@ -1464,8 +1428,8 @@ impl<E: SyncEngine> App<E> {
         self.gallery.update(self.items.clone());
         self.gallery.set_arriving(tree.arriving);
 
-        // A Preview open on an Item whose record just vanished says so rather
-        // than showing bytes nobody claims any more.
+        // A Preview whose record just vanished says so rather than showing bytes
+        // nobody claims any more.
         if let Some(p) = &mut self.preview {
             let id = p.item().id.clone();
             match self.items.iter().find(|i| i.id == id) {
@@ -1503,7 +1467,6 @@ impl<E: SyncEngine> App<E> {
     }
 
     /// Rebuild the Members screen from claims, the descriptor and the engine.
-    ///
     /// Skipped while the join prompt is open: a Person half-way through typing a
     /// fingerprint must not have it taken away by a background refresh.
     fn rebuild_members(&mut self) {
@@ -1567,8 +1530,7 @@ impl<E: SyncEngine> App<E> {
                 .max()
                 .unwrap_or_default();
             // A Member has left when *every* claim carrying their Person has
-            // `left_at`. One claim with it and one without means a Device
-            // stopped, not that the Person did (ADR-0004 §5).
+            // `left_at`; one with and one without means a Device stopped.
             let mine: Vec<&MembershipClaim> =
                 self.claims.iter().filter(|c| c.person == person.id).collect();
             view.left_at = (!mine.is_empty() && mine.iter().all(|c| c.left_at.is_some()))
@@ -1586,7 +1548,7 @@ impl<E: SyncEngine> App<E> {
         }
 
         // A Device receiving this Circle's bytes that no claim names is never
-        // hidden. It is a fact the Circle is entitled to see.
+        // hidden: it is a fact the Circle is entitled to see.
         let named: HashSet<&str> =
             self.claims.iter().map(|c| c.device.as_str()).collect();
         let unclaimed: Vec<UnclaimedDevice> = self
@@ -1610,9 +1572,8 @@ impl<E: SyncEngine> App<E> {
             })
             .unwrap_or_default();
 
-        // A knock only ever reaches the Steward's Device, and only that Device
-        // may act on it. Everyone else passes an empty list and never sees the
-        // prompt.
+        // Only the Steward's Device may act on a knock; everyone else passes an
+        // empty list and never sees the prompt.
         let i_steward = self.founder_person.as_ref() == Some(&self.me.person);
         let dismissed = crate::cmd::membership::dismissed(&circle.id.0);
         let solicited = crate::cmd::membership::open_window(&circle.id.0);
@@ -1673,8 +1634,7 @@ impl<E: SyncEngine> App<E> {
         self.decode(item);
     }
 
-    /// `j`/`k` in Preview move to the adjacent Item in the Gallery's order
-    /// without leaving the screen.
+    /// `j`/`k` in Preview move to the adjacent Item without leaving the screen.
     fn step_preview(&mut self, delta: isize) {
         let Some(current) = self.preview.as_ref().map(|p| p.item().id.clone()) else { return };
         let Some(pos) = self.items.iter().position(|i| i.id == current) else { return };
@@ -1698,8 +1658,8 @@ impl<E: SyncEngine> App<E> {
         self.decode(item);
     }
 
-    /// One `Full`-class decode plus the Provider's facts, on a blocking task —
-    /// ADR-0003 §1's rule, and the render loop never decodes.
+    /// One `Full`-class decode plus the Provider's facts, on a blocking task:
+    /// the render loop never decodes.
     fn decode(&mut self, item: Item) {
         let Some(path) = item.path.clone() else { return };
         let provider = self.provider.clone();
@@ -1748,8 +1708,8 @@ impl<E: SyncEngine> App<E> {
         if self.stack.last() == Some(&screen) {
             return;
         }
-        // The stack is rooted at Gallery and never empties, and it never grows a
-        // second copy of a screen: `m` from Members is not a second Members.
+        // The stack never grows a second copy of a screen: `m` from Members is
+        // not a second Members.
         self.stack.retain(|s| s != &screen);
         self.stack.push(screen);
     }
@@ -1763,7 +1723,7 @@ impl<E: SyncEngine> App<E> {
         }
     }
 
-    // ── frame (§6.1) ─────────────────────────────────────────────────
+    // ── frame ────────────────────────────────────────────────────────
 
     fn draw(&mut self, frame: &mut Frame) {
         let rows = Layout::vertical([
@@ -1814,7 +1774,7 @@ impl<E: SyncEngine> App<E> {
 
     /// Left: what this Circle is doing. Right: the two permanent degradations —
     /// the preview rung and the apply backend — so neither is discovered on
-    /// failure (§6.1, §7.3).
+    /// failure.
     fn draw_status(&mut self, frame: &mut Frame, area: Rect) {
         if let Some(transient) = self.gallery.take_status() {
             self.say(transient);
@@ -1828,7 +1788,7 @@ impl<E: SyncEngine> App<E> {
             .config
             .named_backend()
             .map(str::to_string)
-            .or_else(|| self.provider.detected().first().map(|b| b.to_string()))
+            .or_else(|| self.backends.first().map(|b| b.to_string()))
             .unwrap_or_else(|| "no apply backend".to_string());
         let right = format!("{} · {backend}", self.rung.label());
         frame.render_widget(Paragraph::new(row(&left, &right, area.width)), area);
@@ -1893,7 +1853,6 @@ impl<E: SyncEngine> App<E> {
                     .iter()
                     .enumerate()
                     .map(|(i, e)| match &e.refusal {
-                        // Greyed with its reason, never omitted.
                         Some(reason) => pick_dim(i == *sel, &format!("{} — {reason}", e.action.label())),
                         None => pick(i == *sel, e.action.label()),
                     })
@@ -1945,11 +1904,8 @@ impl<E: SyncEngine> App<E> {
         );
     }
 
-    /// What the monitor picker calls a target.
-    ///
     /// A Person who named `DP-1` "Desk left" is shown *Desk left (DP-1)*, never
-    /// the label alone: a label renames nothing, and the raw name is what every
-    /// other tool on their machine — and every kith message — will say.
+    /// the label alone: the raw name is what every other tool will say.
     fn target_label(&self, target: &ApplyTarget) -> String {
         match target {
             ApplyTarget::AllMonitors => "every monitor".to_string(),
@@ -1995,22 +1951,19 @@ impl<E: SyncEngine> App<E> {
         self.items.iter().find(|i| &i.id == id)
     }
 
-    /// This Device's Identity, as the Sync Engine spells it. kith mints no
-    /// second ID space, so with the daemon down there is nothing to fall back on.
+    /// This Device's Identity, as the Sync Engine spells it.
     fn device_id(&self) -> Option<String> {
         self.state.device.clone()
     }
 
     fn say(&mut self, line: String) {
         self.status = Some((line, Instant::now()));
-        // A transient line has to be taken back down four seconds later, which
-        // needs a tick to still be redrawing when that moment arrives.
+        // Taking the line back down needs a tick still redrawing then.
         self.settle_until = Instant::now() + STATUS_HOLD + TICK;
         self.dirty = true;
     }
 
-    /// A failure is said *and* kept, so `!` can show it in full afterwards.
-    /// Failure is never silent (§7.7).
+    /// Said *and* kept, so `!` can show it in full afterwards.
     fn fail(&mut self, line: String) {
         self.last_failure = Some(line.clone());
         self.say(format!("{line}  (! for detail)"));
@@ -2044,19 +1997,18 @@ impl<E: SyncEngine> App<E> {
 
 // ── the app's own rebuildable state ──────────────────────────────────
 
-/// `$XDG_STATE_HOME/kith/state.toml`. Rebuildable by ADR-0001's authority rule:
-/// deleting it costs a switcher press and a set of dots, and nothing else.
+/// `$XDG_STATE_HOME/kith/state.toml`. Rebuildable: deleting it costs a switcher
+/// press and a set of dots, and nothing else.
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_circle: Option<String>,
-    /// This Device's engine Identity, remembered so a Delete still works with
-    /// the daemon stopped — the log is keyed by Device and kith mints no id of
-    /// its own to fall back on.
+    /// Remembered so a Delete still works with the daemon stopped: the log is
+    /// keyed by Device and kith mints no id of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<String>,
-    /// Item ids this Device has shown the Person, per Circle. Private, local,
-    /// never synced: an unseen dot nobody else can derive is the point.
+    /// Item ids this Device has shown the Person, per Circle. Never synced: an
+    /// unseen dot nobody else can derive is the point.
     #[serde(default)]
     seen: BTreeMap<String, Vec<String>>,
 }
@@ -2088,8 +2040,8 @@ fn favourites_path() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.data_dir().join("kith/favourites.jsonl"))
 }
 
-/// The effective set is the last operation per `(circle, item)`, and the log is
-/// append-only, so file order *is* that order. Same file `kith list` reads.
+/// The effective set is the last operation per `(circle, item)`; the log is
+/// append-only, so file order *is* that order.
 fn read_favourites(circle: &str) -> HashSet<ItemId> {
     let Some(path) = favourites_path() else { return HashSet::new() };
     let Ok(text) = std::fs::read_to_string(path) else { return HashSet::new() };
@@ -2173,8 +2125,8 @@ fn human_bytes(bytes: u64) -> String {
     if unit == 0 { format!("{bytes} B") } else { format!("{value:.1} {}", UNITS[unit]) }
 }
 
-/// Put a string on the clipboard through the terminal itself (OSC 52), which is
-/// the only way that works over ssh and in a terminal with no helper installed.
+/// The clipboard through the terminal itself (OSC 52) — the only way that works
+/// over ssh and with no helper installed.
 fn osc52(text: &str) {
     let encoded = base64(text.as_bytes());
     let mut out = std::io::stdout();
@@ -2314,18 +2266,13 @@ mod tests {
         assert_eq!(back.seen["kith-abc"], vec!["01H".to_string()]);
     }
 
-    /// The consent invariant, asserted against the source rather than promised
-    /// in a comment.
+    /// The consent invariant, asserted against the source rather than promised.
     ///
-    /// Every construction of the Apply command must sit above `fn perform`,
-    /// which is where `on_key`'s call tree lives; `on_sync` and `on_tick` are
-    /// below it and return `()` by signature, so arriving content cannot reach
-    /// the Provider even by mistake. If this test fails, either a new Apply site
-    /// appeared outside a key handler or the file was reordered — check which
-    /// before touching the number.
-    ///
-    /// The needle is assembled at run time so this test's own text does not
-    /// count as one of the sites it is counting.
+    /// Every construction of the Apply command must sit above `fn perform`, where
+    /// `on_key`'s call tree lives. If this fails, either a new Apply site appeared
+    /// outside a key handler or the file was reordered — check which before
+    /// touching the number. The needle is assembled at run time so this test's own
+    /// text is not one of the sites it counts.
     #[test]
     fn apply_is_only_ever_constructed_in_a_key_handler() {
         let needle = format!("Cmd::{} {{", "Apply");

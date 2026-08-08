@@ -1,20 +1,10 @@
 //! The Circle and Collection descriptors, and the protocol that writes them.
 //!
-//! A Circle's shared state has exactly two singletons (ADR-0004 §5): `circle.toml`
-//! says which Circle this tree is and who founded it, and `collections/<id>.toml`
-//! says which Provider a Collection's Items belong to. Everything else under
-//! `.kith/` is an append-only log or a per-Device claim.
-//!
-//! Descriptors are the one rewritable thing in a tree whose spine is "append,
-//! never rewrite" (ADR-0004 §1, W2). That is not a loophole: W1 still holds, so a
-//! descriptor has exactly one writing Device and rewriting it races with nobody.
-//! What makes the rewrite safe on a transport with no coordinator is the protocol
-//! below — write beside the target, flush, rename — with a temp name the Sync
-//! Engine has been taught to ignore, so a half-written descriptor never replicates.
-//!
-//! v0.1 writes each descriptor once and never rewrites it (ROADMAP §2: no rename,
-//! no delete, no Circle settings). The protocol is here in full anyway, because the
-//! milestone that gains rename must not have to invent one.
+//! `circle.toml` says which Circle this tree is and who founded it;
+//! `collections/<id>.toml` says which Provider a Collection's Items belong to.
+//! Descriptors are the one rewritable thing in an otherwise append-only tree, and
+//! what makes the rewrite safe with no coordinator is the protocol below — write
+//! beside the target, flush, rename — under a temp name the Sync Engine ignores.
 
 use std::fs;
 use std::io::{self, Write};
@@ -24,65 +14,47 @@ use serde::{Deserialize, Serialize};
 
 /// The descriptor schema this build writes and understands.
 ///
-/// Bumped only by a breaking change: additive fields do not move it, and a
-/// breaking change is a new path rather than a rewrite (ADR-0004 §11). Reading is
-/// not applying, so a descriptor carrying a higher `schema` is returned here as it
-/// was found and reported by `kith doctor` — refusing to read it would break a
-/// Circle for the older Device, which is the opposite of degrading gracefully.
+/// A descriptor carrying a higher one is still returned as it was found: refusing
+/// to read it would break the Circle for the older Device.
 pub const SCHEMA: u32 = 1;
 
-/// Every byte of a Circle's shared state lives under this one directory, and it is
-/// hidden from the Gallery (ADR-0004 §2).
+/// Every byte of a Circle's shared state lives under this one hidden directory.
 const KITH_DIR: &str = ".kith";
 const CIRCLE_FILE: &str = "circle.toml";
 const COLLECTIONS_DIR: &str = "collections";
 
 /// The suffix that makes a half-written descriptor invisible to the Sync Engine.
 ///
-/// This constant and the line `seed_stignore` writes are one decision, so they are
-/// spelled once, here: change this and the engine stops ignoring our temp files.
+/// This constant and the line `seed_stignore` writes are one decision, so they
+/// are spelled once, here.
 const TMP_SUFFIX: &str = ".kith-tmp";
 
 /// The name of the engine's per-Circle ignore file.
-///
-/// Along with [`DELETE_OK`] this is one of exactly two engine spellings in this
-/// module, and both are here only because the module's own contract names the
-/// file it seeds. Everything that is a *policy* — which globs a Circle stops
-/// replicating — arrives as an argument (see [`seed_stignore`]). When the seam
-/// grows an accessor for the ignore file's name, these two constants go with it.
 const IGNORE_FILE: &str = ".stignore";
 
 /// The engine's prefix for "you may delete this to unblock a directory removal".
 ///
-/// kith applies it to its own two paths and to nothing else: it is a statement
-/// about paths kith owns, and it is exactly why nothing authoritative is ever
-/// stored under `.kith/local` (ADR-0004 §7).
+/// kith applies it to its own two paths and to nothing else, which is why nothing
+/// authoritative is ever stored under either.
 const DELETE_OK: &str = "(?d)";
 
-/// Which Circle this tree is, who founded it, and — in v0.1 — whose Device is its
-/// Steward's.
+/// Which Circle this tree is, who founded it, and whose Device is its Steward's.
 ///
-/// Written once by the founding Device and never rewritten (ADR-0004 §5). Every
-/// surface that names the Circle's Steward reads `founder_device` from here rather
-/// than from the transport, because this is the one fact that reads the same from
-/// every Device, including the Steward's own (ADR-0002 §3).
-///
-/// `founder_person` names a **Person** and `founder_device` names a **Device**, and
-/// the gap between them is real: a Device that has never run kith has published no
-/// Membership claim, so a Circle can know its Steward's Device and still be unable
-/// to name the Steward. kith says so rather than inventing a placeholder Person.
+/// Every surface naming the Steward reads `founder_device` from here rather than
+/// from the transport, because it is the one fact that reads the same from every
+/// Device. A Device that has never run kith has published no Membership claim, so
+/// a Circle can know its Steward's Device and still be unable to name the Person.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CircleDescriptor {
     pub schema: u32,
-    /// The Circle's immutable id. On disk the key is `circle`, as ADR-0004 §5
-    /// fixed it — the file is read by other kith builds and by People with an
-    /// editor, so its spelling is part of the format and not of this struct.
+    /// The Circle's immutable id, spelled `circle` on disk because the file is
+    /// read by other kith builds and by People with an editor.
     #[serde(rename = "circle")]
     pub id: String,
-    /// The Circle's name. Mutable in a later milestone; write-once in v0.1.
+    /// The Circle's name — mutable in a later milestone, write-once in v0.1.
     pub name: String,
     /// RFC 3339, and the tie-break when two Devices each claimed a Circle that had
-    /// no descriptor yet: earliest `created` wins (ADR-0004 §8).
+    /// no descriptor yet: earliest `created` wins.
     pub created: String,
     pub founder_person: String,
     pub founder_device: String,
@@ -90,25 +62,17 @@ pub struct CircleDescriptor {
 
 /// Which Provider a Collection's Items belong to.
 ///
-/// v0.1 creates exactly one Collection per Circle, with the literal id `main` and
-/// the `wallpaper` Provider. The id is opaque in the format, so v0.3's additional
-/// Collections need no format change (docs/spec/collections.md §8).
-///
-/// Two fields ADR-0004 §5 sketches are deliberately absent from this build's
-/// struct: `name`, which v0.1 has no surface to show or edit, and `root`, which is
-/// always `"."` while the sole Collection *is* the Circle root. Both are additive
-/// when they land, and a descriptor written by a later kith that carries them is
-/// read here without complaint — v0.1 simply keeps its own answer for them, and
-/// `kith doctor` is where that is surfaced rather than guessed at.
+/// The id is opaque in the format, so additional Collections need no format
+/// change; a later kith's extra fields are read here without complaint.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionDescriptor {
     pub schema: u32,
-    /// The Collection's id. Also its filename, which is why [`read_collection`]
-    /// refuses an id that could name a path.
+    /// The Collection's id, and also its filename.
     pub collection: String,
-    /// The Provider that claims this Collection's Items — `wallpaper` in v0.1. A
-    /// descriptor naming a Provider this build lacks is not an error here: it is
-    /// read faithfully so the layer above can say which Provider is missing.
+    /// The Provider that claims this Collection's Items — `wallpaper` in v0.1.
+    ///
+    /// A Provider this build lacks is read faithfully rather than refused, so the
+    /// layer above can say which one is missing.
     pub provider: String,
 }
 
@@ -122,8 +86,8 @@ pub fn circle_path(root: &Path) -> PathBuf {
     kith_dir(root).join(CIRCLE_FILE)
 }
 
-/// `<root>/.kith/collections` — a directory rather than a file, because the
-/// one-to-many Circle→Collection shape is modelled from day one.
+/// `<root>/.kith/collections` — a directory, because Circle→Collection is
+/// one-to-many.
 pub fn collections_dir(root: &Path) -> PathBuf {
     kith_dir(root).join(COLLECTIONS_DIR)
 }
@@ -131,39 +95,26 @@ pub fn collections_dir(root: &Path) -> PathBuf {
 /// Serialise `value` as TOML and put it at `path` without ever letting a partial
 /// document exist under that name.
 ///
-/// Write `<target>.kith-tmp` beside the target, flush it to the platter, then
-/// `rename(2)` over the target (ADR-0004 §3). The rename is atomic, so a reader —
-/// or the Sync Engine's scanner — sees either the old descriptor or the new one and
-/// never half of either, and the temp name is ignored from sync, so the partial
-/// document never replicates.
-///
-/// Missing parent directories are created: a descriptor is often the first thing
-/// written into a brand-new `.kith/`.
+/// Write beside the target, flush, then `rename(2)` over it: a reader sees either
+/// the old descriptor or the new one, and the temp name never replicates. Missing
+/// parent directories are created.
 pub fn write_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let text = toml::to_string_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     write_bytes_atomic(path, text.as_bytes())
 }
 
-/// Read this Circle's descriptor.
+/// Read this Circle's descriptor; `Ok(None)` is "not here yet", malformed is an error.
 ///
-/// `Ok(None)` means the tree has no descriptor yet, which is an ordinary state and
-/// not a fault: a Member who adopts a wp-sync Circle before the Steward's Device
-/// has upgraded gets a working Collection and a descriptor that arrives later
-/// (docs/spec/collections.md §4.3). A descriptor that exists but does not parse is
-/// an error — that one someone has to look at.
-///
-/// Conflict copies are not consulted here. Absorbing one means matching the
-/// engine's own name for it (ADR-0004 §8), and those globs live behind the seam;
-/// the layer that already holds them does that work.
+/// A Member who adopts before the Steward's Device has upgraded holds a working
+/// Circle whose descriptor arrives later, so absence is a state and not a fault.
 pub fn read_circle(root: &Path) -> io::Result<Option<CircleDescriptor>> {
     read_toml(&circle_path(root))
 }
 
 /// Write this Circle's descriptor.
 ///
-/// Write-once is a *milestone* rule, not a format rule (ADR-0004 §1), so it is
-/// enforced by the caller that reads first — `kith create` — and not here. What is
+/// Write-once is a milestone rule enforced by `kith create`, not here; what is
 /// enforced here is that the bytes land whole.
 pub fn write_circle(root: &Path, d: &CircleDescriptor) -> io::Result<()> {
     write_atomic(&circle_path(root), d)
@@ -182,11 +133,8 @@ pub fn write_collection(root: &Path, d: &CollectionDescriptor) -> io::Result<()>
 
 /// Every Collection descriptor in this Circle, ordered by id.
 ///
-/// An absent `collections/` directory yields an empty list — the same "not yet"
-/// that [`read_circle`] reports as `None`. Only files named `<id>.toml` with no dot
-/// inside the id are read: the segment before the first dot is the id (ADR-0004
-/// §4.3), so a copy the engine may leave beside a descriptor — a conflict copy, or
-/// a later milestone's generation file — never becomes a phantom second Collection.
+/// Only files named `<id>.toml` with no dot inside the id are read, so a copy the
+/// engine leaves beside a descriptor never becomes a phantom second Collection.
 pub fn read_collections(root: &Path) -> io::Result<Vec<CollectionDescriptor>> {
     let dir = collections_dir(root);
     let entries = match fs::read_dir(&dir) {
@@ -215,26 +163,10 @@ pub fn read_collections(root: &Path) -> io::Result<Vec<CollectionDescriptor>> {
 /// Seed this Circle's ignore file so kith's own scratch and its half-written
 /// descriptors never leave this Device.
 ///
-/// Two lines are kith's own and are always present (ADR-0002 §2, ADR-0004 §2):
-/// `.kith/local`, the per-Device staging area, and `*.kith-tmp`, this module's temp
-/// files. Both carry [`DELETE_OK`], because kith is content for the engine to
-/// remove them when they block a directory removal — and that permission is exactly
-/// why nothing authoritative is ever stored under either.
-///
-/// `reserved` is written verbatim, in the order given. The globs belong to the Sync
-/// Engine implementation and arrive as an argument so that no engine spelling has
-/// to be repeated here (ADR-0002 §1).
-///
-/// One caveat for callers, because the two lists are easy to confuse: this is *not*
-/// `SyncEngine::reserved_paths()`. That list exists to hide engine artefacts from
-/// the Gallery, and it includes conflict copies — which must keep replicating, so
-/// that the Circle can handle them rather than hide them (ADR-0002 §2). Pass the
-/// globs whose replication this Circle actually means to stop.
-///
-/// Existing lines are preserved in place and nothing is reordered: adopting a
-/// wp-sync Circle adds to that Circle's ignores and never replaces them
-/// (docs/spec/collections.md §4.2). Seeding twice writes nothing the second time,
-/// so adoption may call it unconditionally.
+/// `reserved` is written verbatim, in the order given, and existing lines are
+/// preserved in place — so adoption may call this unconditionally. Note this is
+/// *not* `SyncEngine::reserved_paths()`, which includes conflict copies and must
+/// keep replicating; pass the globs whose replication this Circle means to stop.
 pub fn seed_stignore(root: &Path, reserved: &[&str]) -> io::Result<()> {
     let path = root.join(IGNORE_FILE);
 
@@ -267,18 +199,15 @@ pub fn seed_stignore(root: &Path, reserved: &[&str]) -> io::Result<()> {
     write_bytes_atomic(&path, body.as_bytes())
 }
 
-// ── the protocol itself ──────────────────────────────────────────────
-
 fn read_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    // Unknown keys are ignored rather than refused: a descriptor written by a newer
-    // kith stays readable, which is the whole of ADR-0004 §11's forward-compat rule
-    // for this file. Nothing is dropped by ignoring them, because v0.1 never
-    // rewrites a descriptor it did not just create.
+    // Unknown keys are ignored rather than refused, so a descriptor written by a
+    // newer kith stays readable. Nothing is dropped: v0.1 never rewrites one it
+    // did not just create.
     toml::from_str(&text)
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display())))
@@ -292,23 +221,20 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let (tmp, mut file) = create_temp(path)?;
     let staged = file
         .write_all(bytes)
-        // Flush our own bytes to the platter before the rename publishes them, so a
-        // crash cannot leave a descriptor whose name is new and whose content is not.
+        // Flush before the rename publishes them, so a crash cannot leave a
+        // descriptor whose name is new and whose content is not.
         .and_then(|()| file.sync_all());
     drop(file);
 
     if let Err(e) = staged.and_then(|()| fs::rename(&tmp, path)) {
-        // Leave no stray temp file behind on the way out. It would be ignored from
-        // sync and therefore harmless, but a Circle that accumulates litter is one a
-        // Person cannot read with `ls`, and that readability is half the point of
-        // this format.
+        // Harmless if it survived, but a Circle a Person cannot read with `ls` is
+        // half the point of this format gone.
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
 
-    // Best effort: makes the rename itself durable. Not every filesystem permits it,
-    // and a refusal here does not make the write wrong — the descriptor is whole
-    // either way, and the tree, not this call, is the authority (ADR-0001).
+    // Best effort: makes the rename itself durable. Not every filesystem permits
+    // it, and the descriptor is whole either way.
     if let Some(dir) = path.parent() {
         let _ = fs::File::open(dir).and_then(|d| d.sync_all());
     }
@@ -317,11 +243,9 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// `<target>.kith-tmp`, beside the target so the rename stays within one filesystem.
 ///
-/// Exclusive creation, with a pid-qualified fallback: two kith processes on one
-/// Device are the only race W1 does not already rule out, and two writers sharing
-/// one temp file would interleave into a torn document that the rename then
-/// publishes. Both names end in the suffix the engine ignores, which is the
-/// property that actually matters.
+/// Exclusive creation with a pid-qualified fallback, because two kith processes
+/// sharing one temp file would interleave into a torn document the rename then
+/// publishes. Both names end in the suffix the engine ignores.
 fn create_temp(path: &Path) -> io::Result<(PathBuf, fs::File)> {
     let tmp = temp_path(path, None);
     match fs::File::create_new(&tmp) {
@@ -346,10 +270,8 @@ fn temp_path(path: &Path, qualifier: Option<u32>) -> PathBuf {
 
 /// A Collection id is also a filename, so it may never name a path.
 ///
-/// v0.1's id is the literal `main` and v0.3 mints opaque ids from an alphabet with
-/// no dot in it, so refusing separators and dots costs nothing and buys the
-/// guarantee that no descriptor can be read from — or written to — outside the
-/// Circle. It also keeps the reading rule in [`read_collections`] honest.
+/// Minted ids carry no dot, so refusing separators and dots costs nothing and
+/// keeps the reading rule in [`read_collections`] honest.
 fn collection_file(root: &Path, id: &str) -> io::Result<PathBuf> {
     let usable = !id.is_empty()
         && !id.contains('.')
@@ -417,9 +339,6 @@ mod tests {
 
     #[test]
     fn on_disk_keys_are_the_ones_the_format_fixed() {
-        // The file is read by other kith builds and by People with an editor, so
-        // its key names are part of the format even where this struct's field is
-        // spelled differently.
         let root = scratch("circle-keys");
         write_circle(&root, &a_circle()).unwrap();
 
@@ -432,8 +351,6 @@ mod tests {
 
     #[test]
     fn an_absent_descriptor_is_not_a_fault() {
-        // A Member who adopts before the Steward's Device has upgraded holds a
-        // working Circle with no descriptor in it. That is a state, not an error.
         let root = scratch("absent");
         assert!(read_circle(&root).unwrap().is_none());
         assert!(read_collection(&root, "main").unwrap().is_none());
@@ -468,7 +385,6 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_ignored_rather_than_refused() {
-        // ADR-0004 §11: a descriptor written by a newer kith stays readable.
         let root = scratch("forward-compat");
         fs::create_dir_all(collections_dir(&root)).unwrap();
         fs::write(
@@ -498,8 +414,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_leaves_no_temp_file_either() {
-        // A directory where the descriptor should be: the rename cannot land, and
-        // the half-written document must not survive the failure.
+        // A directory where the descriptor should be: the rename cannot land.
         let root = scratch("failed-write");
         let target = kith_dir(&root).join("circle.toml");
         fs::create_dir_all(&target).unwrap();
@@ -527,8 +442,6 @@ mod tests {
 
     #[test]
     fn a_rewrite_replaces_the_descriptor_whole() {
-        // Not a v0.1 path — nothing rewrites a descriptor before rename ships —
-        // but the protocol is the one that milestone will use.
         let root = scratch("rewrite");
         write_circle(&root, &a_circle()).unwrap();
 
@@ -573,9 +486,6 @@ mod tests {
 
     #[test]
     fn a_copy_beside_a_descriptor_is_not_a_second_collection() {
-        // The id is the segment before the first dot (ADR-0004 §4.3), so a
-        // conflict copy or a later generation of `main.toml` never doubles the
-        // Circle's Collections.
         let root = scratch("copies");
         write_collection(&root, &a_collection()).unwrap();
         fs::write(
@@ -592,9 +502,8 @@ mod tests {
 
     #[test]
     fn the_seed_carries_kiths_own_lines_and_the_globs_it_was_given() {
-        // The globs are the caller's, verbatim and in order. The fixture uses
-        // names no engine has ever used, which is the point: this module cannot
-        // recognise them, so it cannot be quietly rewritten to know one.
+        // The fixture uses names no engine has ever used, so this module cannot
+        // be quietly rewritten to recognise one.
         let root = scratch("seed");
         seed_stignore(&root, &[".engine-bookkeeping", "archive/**"]).unwrap();
 
@@ -617,7 +526,6 @@ mod tests {
 
     #[test]
     fn seeding_twice_adds_nothing_and_keeps_what_was_already_there() {
-        // Adoption runs against a Circle whose ignores are somebody else's work.
         let root = scratch("seed-twice");
         fs::write(root.join(IGNORE_FILE), "*.tmp\n// hand-written\n").unwrap();
 

@@ -1,60 +1,25 @@
 //! The one configuration file — `config.toml`, and nothing else.
 //!
-//! ROADMAP fixes this file at three things: the apply backend and its custom
-//! command, monitor names, and an override for the Sync Engine's address and
-//! API key. No themes, no keybindings, no Circle roots. Everything else kith
-//! knows is either derived from the synced tree or is behaviour rather than a
-//! setting, and a config file that grows keys nobody can explain is how a small
-//! tool stops being small.
-//!
-//! Three rules the whole surface leans on (`docs/spec/cli-tui.md` §8.1):
-//!
-//! * **A missing file is not an error.** Every key has a default and kith runs
-//!   with no config at all — [`load`] on a Device with no file returns exactly
-//!   what an empty file returns.
-//! * **An unknown key is a warning, never fatal.** A file written for a later
-//!   kith still works here. kith names the keys it ignored rather than letting a
-//!   Person believe they were honoured.
-//! * **A wrong type is fatal.** Guessing what a Person meant is how a config
-//!   quietly stops meaning what it says; the caller turns [`ConfigError`] into
-//!   exit 78 and the message names the line.
-//!
-//! And one rule this module exists to make possible: a **named** apply backend
-//! that this Device does not have is refused out loud, never quietly replaced by
-//! whatever else happened to be installed — see [`Config::backend_refusal`].
-//!
-//! kith reads this file and never writes it. It is the Person's, not ours: there
-//! is no `kith config` verb, no migration pass, and nothing here is rewritten on
-//! upgrade.
+//! Three rules the whole surface leans on: a missing file is not an error, an
+//! unknown key is a warning, and a wrong type is fatal. kith reads this file and
+//! never writes it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Every configuration failure is the same kind of failure, and it is this one
-/// (sysexits `EX_CONFIG`). Exposed so a caller does not have to spell 78.
+/// Every configuration failure exits with this (sysexits `EX_CONFIG`).
 pub const EXIT_CONFIG: i32 = 78;
 
-/// The standing note code an ignored key travels under, so `--json` tells a
-/// script exactly what the human surface said in grey (spec §3.2).
+/// The note code an ignored key travels under in the `--json` envelope.
 pub const UNKNOWN_KEY_NOTE: &str = "config.unknown_key";
 
-/// Accepted values of `provider.wallpaper.backend` (ADR-0003 §4's ladder, plus
-/// `auto` for "let kith choose" and `custom` for the escape hatch).
-pub const APPLY_BACKENDS: &[&str] = &[
-    "auto",
-    "gnome",
-    "kde",
-    "swww",
-    "hyprpaper",
-    "swaybg",
-    "xwallpaper",
-    "feh",
-    "custom",
-];
+/// Accepted values of `provider.wallpaper.backend` — the backends the wallpaper
+/// Provider implements, plus `auto` and the `custom` escape hatch.
+pub const APPLY_BACKENDS: &[&str] = &["auto", "swww", "hyprpaper", "feh", "custom"];
 
-/// The settings a Person can hold, flattened to the five things v0.1 acts on.
+/// The settings a Person can hold.
 ///
 /// Deliberately not derived `Serialize`: kith never writes this file back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,57 +29,35 @@ pub struct Config {
     ///
     /// `backend = "auto"` normalises to `None` — auto *is* the absence of a
     /// choice, and a surface that has to special-case the string will forget to.
-    /// A value here is a demand, not a preference: see
-    /// [`backend_refusal`](Config::backend_refusal).
     pub apply_backend: Option<String>,
 
     /// `provider.wallpaper.custom.apply` — the shell template Apply runs when no
-    /// built-in backend fits (ADR-0003 §4). `{item}` is the path to the Item's
-    /// bytes and is always quoted by kith; `{target}` is the chosen monitor.
-    ///
-    /// Setting it implies `apply_backend == Some("custom")`, per spec §8.2.
+    /// built-in backend fits. Setting it implies `apply_backend == "custom"`.
     pub apply_command: Option<String>,
 
-    /// Output names the Person has given labels to in
-    /// `[provider.wallpaper.monitors]`, in the file's own (alphabetical) order.
-    ///
-    /// Labels only. This list cannot create, reorder or hide an output — the
-    /// backend enumerates monitors at Action time because monitors hotplug, and
-    /// an unlisted output shows its raw name. The label each one was given rides
-    /// on [`Loaded::monitor_labels`], which is where the monitor picker and
-    /// `kith doctor` should read it from.
+    /// Output names the Person labelled in `[provider.wallpaper.monitors]`, in
+    /// the file's own order. Labels only: this list cannot create, reorder or
+    /// hide an output.
     pub monitors: Vec<String>,
 
-    /// `sync_engine.address` — overrides credential discovery (ADR-0002 §6).
-    /// Whether a non-loopback address is allowed, and the `engine.remote`
-    /// warning it earns, are the engine seam's call; this module only carries
-    /// what the Person wrote.
+    /// `sync_engine.address` — overrides credential discovery.
     pub engine_address: Option<String>,
 
-    /// `sync_engine.api_key` — read, never written. kith does not rotate,
-    /// regenerate or guess a key, and says where it read one from when it is
-    /// rejected.
+    /// `sync_engine.api_key` — read, never written.
     pub engine_api_key: Option<String>,
 }
 
 impl Config {
-    /// The backend the Person named, or `None` when they left it to kith.
-    ///
-    /// `None` means "run ADR-0003 §4's detection ladder", and is the only case
-    /// in which kith picks a backend on a Person's behalf.
+    /// The backend the Person named, or `None` to run the detection ladder.
     pub fn named_backend(&self) -> Option<&str> {
         self.apply_backend.as_deref()
     }
 
-    /// The refusal a surface prints when the named backend is not among the
-    /// backends this Device actually has, given the ids the Provider detected.
+    /// The refusal a surface prints when the named backend is not among those
+    /// this Device actually has.
     ///
-    /// `None` means nothing was named, or the named one is present — in both
-    /// cases Apply proceeds. A `Some` is the whole point of this module: a
-    /// Person who wrote `backend = "swww"` on a machine without swww gets Apply
-    /// declared `Unavailable` with this reason, never a silent substitution by
-    /// feh. Falling back would be the surface doing something the Person did not
-    /// ask for, on the one Action that is meant to be deliberate.
+    /// A named backend is refused out loud, never silently substituted by
+    /// whatever else happened to be installed.
     pub fn backend_refusal(&self, detected: &[&str]) -> Option<String> {
         let named = self.named_backend()?;
         let present = if named == "custom" {
@@ -130,35 +73,23 @@ impl Config {
     }
 }
 
-/// A parsed config plus everything the surfaces need to be honest about it:
-/// where it came from, whether it was there at all, and which keys were ignored.
-///
-/// [`load`] hands back only the [`Config`]; callers that render notes, run
-/// `kith doctor`'s `config.file` check, or want the two keys that do not fit the
-/// flat shape ([`monitor_labels`](Self::monitor_labels),
-/// [`apply_targets_command`](Self::apply_targets_command)) use [`inspect`].
+/// A parsed config plus what the surfaces need to be honest about it: where it
+/// came from, whether it was there at all, and which keys were ignored.
 #[derive(Clone, Debug, Default)]
 pub struct Loaded {
     pub config: Config,
     /// Where kith looked. `None` only when this Device has no config directory.
     pub path: Option<PathBuf>,
-    /// Whether a file was actually there. A missing one is not an error, but an
-    /// explicit `--config` that resolves to nothing is worth a caller's word.
+    /// Whether a file was actually there.
     pub present: bool,
-    /// Dotted paths of keys kith does not know, in file order. Ignored, warned
-    /// about, never fatal.
+    /// Dotted paths of keys kith does not know, in file order.
     pub unknown_keys: Vec<String>,
     /// `output name → friendly label`, aligned with [`Config::monitors`].
     pub monitor_labels: Vec<(String, String)>,
-    /// `provider.wallpaper.custom.targets` — the optional command that lists one
-    /// output name per line. Absent means the custom backend can address all
-    /// monitors and nothing narrower (ADR-0003 §4).
-    pub apply_targets_command: Option<String>,
 }
 
 impl Loaded {
-    /// The friendly label a Person gave an output, if they gave it one. An
-    /// output with no label keeps its raw name; labels rename nothing.
+    /// The friendly label a Person gave an output; labels rename nothing.
     pub fn label(&self, output: &str) -> Option<&str> {
         self.monitor_labels
             .iter()
@@ -166,8 +97,8 @@ impl Loaded {
             .map(|(_, label)| label.as_str())
     }
 
-    /// One human sentence per ignored key, ready for a `!` line on stderr or a
-    /// [`UNKNOWN_KEY_NOTE`] note in the JSON envelope.
+    /// One human sentence per ignored key, for stderr or a [`UNKNOWN_KEY_NOTE`]
+    /// note in the JSON envelope.
     pub fn warnings(&self) -> Vec<String> {
         let where_ = self
             .path
@@ -181,8 +112,7 @@ impl Loaded {
     }
 }
 
-/// Why kith will not run on this file. Every variant is exit [`EXIT_CONFIG`];
-/// they differ only in what a Person has to go and fix.
+/// Why kith will not run on this file. Every variant is exit [`EXIT_CONFIG`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{path} could not be read: {source}")]
@@ -192,7 +122,7 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     /// Invalid TOML, or a value of the wrong type. The message is the parser's
-    /// own, which names the line and points at the column.
+    /// own, which names the line.
     #[error("{path} is not valid configuration:\n{message}")]
     Parse { path: PathBuf, message: String },
     /// It parses, but kith cannot honour it — and will not guess.
@@ -215,8 +145,7 @@ impl ConfigError {
         }
     }
 
-    /// An imperative the Person can literally act on, or nothing. Never padded
-    /// with advice — spec §7.7.
+    /// An imperative the Person can act on, or nothing.
     pub fn fix(&self) -> Option<String> {
         match self {
             ConfigError::Unreadable { path, .. } => Some(format!(
@@ -232,11 +161,9 @@ impl ConfigError {
     }
 }
 
-/// `$KITH_CONFIG`, else `$XDG_CONFIG_HOME/kith/config.toml` (spec §8.1).
+/// `$KITH_CONFIG`, else `$XDG_CONFIG_HOME/kith/config.toml`.
 ///
-/// `--config <PATH>` is the argument parser's business: it wins over both, and
-/// reaches this module as [`inspect_at`]. `None` means this Device has no config
-/// directory at all, which is not an error either — it just means defaults.
+/// `None` means this Device has no config directory, which just means defaults.
 pub fn path() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("KITH_CONFIG")
         && !explicit.is_empty()
@@ -248,16 +175,10 @@ pub fn path() -> Option<PathBuf> {
 
 /// The settings, or defaults. A missing file is not an error.
 ///
-/// Unknown keys are warned about on stderr — stdout stays clean, so
-/// `kith invite | wl-copy` is unaffected — and ignored.
-///
-/// A file kith cannot understand ends the process with [`EXIT_CONFIG`] instead
-/// of returning defaults, because running on defaults would point kith at a
-/// different daemon, or a different apply backend, than the Person wrote down.
-/// Callers that must render the failure themselves — the dispatcher, and
-/// `kith doctor`, which has fifteen more checks to run and may not exit on the
-/// first one — call [`inspect`] instead. So does anything already inside the
-/// alternate screen: an exit from here would not restore the terminal.
+/// Unknown keys are warned about on stderr and ignored; a file kith cannot
+/// understand ends the process with [`EXIT_CONFIG`]. Callers that must render
+/// the failure themselves — or that are already inside the alternate screen —
+/// use [`inspect`].
 pub fn load() -> Config {
     match inspect() {
         Ok(loaded) => {
@@ -277,7 +198,7 @@ pub fn load() -> Config {
 }
 
 /// [`load`] with the failure and the ignored keys handed back rather than
-/// printed, plus the two keys the flat [`Config`] has no room for.
+/// printed.
 pub fn inspect() -> Result<Loaded, ConfigError> {
     match path() {
         Some(p) => inspect_at(&p),
@@ -288,9 +209,7 @@ pub fn inspect() -> Result<Loaded, ConfigError> {
 /// [`inspect`] against an explicit path — `--config`, or a test's scratch file.
 ///
 /// A path that does not exist yields defaults with `present: false` rather than
-/// an error, so there is exactly one rule about missing files everywhere in
-/// kith. A caller that wants to complain about an explicit `--config` naming
-/// nothing has `present` to complain with.
+/// an error.
 pub fn inspect_at(path: &Path) -> Result<Loaded, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
@@ -311,14 +230,9 @@ pub fn inspect_at(path: &Path) -> Result<Loaded, ConfigError> {
     }
 }
 
-// ── parsing ──────────────────────────────────────────────────────────
-//
-// Two passes over the same text, each doing what it is good at. The typed pass
-// gives serde's own error for a wrong type, which names the line and points at
-// the column — and it *ignores* keys it does not know, which is the forward
-// compatibility we want. The untyped pass then walks the same table against the
-// known key surface to find those ignored keys, because a key nobody mentions is
-// a config that silently does not mean what it says.
+// Two passes over the same text: the typed pass gives serde's own error for a
+// wrong type and ignores keys it does not know; the untyped pass walks the same
+// table against the known key surface to name those ignored keys.
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -387,11 +301,10 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
     let engine_api_key = non_empty(path, "sync_engine.api_key", engine.api_key)?;
 
     let apply_command = non_empty(path, "provider.wallpaper.custom.apply", custom.apply)?;
-    let apply_targets_command =
-        non_empty(path, "provider.wallpaper.custom.targets", custom.targets)?;
+    // Validated but unused: nothing reads the targets command yet.
+    non_empty(path, "provider.wallpaper.custom.targets", custom.targets)?;
 
-    // The enum is case-folded on the way in: a Person writing "SWWW" meant swww,
-    // and there is nothing else it could have meant.
+    // Case-folded on the way in: a Person writing "SWWW" meant swww.
     let named = wallpaper
         .backend
         .map(|b| b.trim().to_ascii_lowercase())
@@ -408,7 +321,7 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
     }
 
     let apply_backend = match (named.as_deref(), apply_command.is_some()) {
-        // Spec §8.2: setting the custom command implies the custom backend.
+        // Setting the custom command implies the custom backend.
         (None | Some("auto") | Some("custom"), true) => Some("custom".to_string()),
         (Some("custom"), false) => {
             return Err(ConfigError::Invalid {
@@ -421,9 +334,6 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
             });
         }
         // A named backend *and* a custom command is two answers to one question.
-        // kith will not pick one: whichever it picked would be a wallpaper the
-        // Person did not ask for, and Apply is the Action that must never
-        // surprise anybody.
         (Some(other), true) => {
             return Err(ConfigError::Invalid {
                 path: path.to_path_buf(),
@@ -435,8 +345,7 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
                     .into(),
             });
         }
-        // No named backend: ADR-0003 §4's ladder decides, which is the only time
-        // kith chooses a backend on a Person's behalf.
+        // No named backend: the detection ladder decides.
         (None | Some("auto"), false) => None,
         (Some(other), false) => Some(other.to_string()),
     };
@@ -466,12 +375,11 @@ fn parse(text: &str, path: &Path) -> Result<Loaded, ConfigError> {
         present: true,
         unknown_keys,
         monitor_labels: labels.into_iter().collect(),
-        apply_targets_command,
     })
 }
 
 /// A key written as an empty string is a mistake, not a setting: it would read
-/// as "configured" everywhere downstream and behave as "absent".
+/// as "configured" downstream and behave as "absent".
 fn non_empty(path: &Path, key: &str, value: Option<String>) -> Result<Option<String>, ConfigError> {
     match value {
         Some(v) if v.trim().is_empty() => Err(ConfigError::Invalid {
@@ -484,8 +392,8 @@ fn non_empty(path: &Path, key: &str, value: Option<String>) -> Result<Option<Str
     }
 }
 
-/// One known key. `open` marks a table whose keys are the Person's own names
-/// (their monitor outputs), where kith has no list to check anything against.
+/// One known key. `open` marks a table whose keys are the Person's own names,
+/// where kith has no list to check anything against.
 struct Key {
     name: &'static str,
     children: &'static [Key],
@@ -494,8 +402,8 @@ struct Key {
 
 const LEAF: &[Key] = &[];
 
-/// The whole known key surface, and the whole of ROADMAP's Configuration row.
-/// Anything absent from this tree is unknown: named once, ignored, never fatal.
+/// The whole known key surface. Anything absent from this tree is unknown:
+/// named once, ignored, never fatal.
 const KNOWN_KEYS: &[Key] = &[
     Key {
         name: "sync_engine",
@@ -535,8 +443,6 @@ fn collect_unknown(table: &toml::Table, known: &[Key], prefix: &str, out: &mut V
             format!("{prefix}.{}", quote(name))
         };
         match known.iter().find(|k| k.name == name.as_str()) {
-            // Forward compatibility: a key this kith does not know is one a
-            // later kith might. Say which, ignore it, keep running.
             None => out.push(dotted),
             Some(k) if k.open => {}
             Some(k) if !k.children.is_empty() => {
@@ -544,7 +450,7 @@ fn collect_unknown(table: &toml::Table, known: &[Key], prefix: &str, out: &mut V
                     collect_unknown(inner, k.children, &dotted, out);
                 }
             }
-            // A leaf: its type is the typed pass's problem, not this one's.
+            // A leaf: its type is the typed pass's problem.
             Some(_) => {}
         }
     }
@@ -674,9 +580,9 @@ mod tests {
             loaded.config.apply_command.as_deref(),
             Some("xfconf-query -s {item}")
         );
-        assert_eq!(
-            loaded.apply_targets_command.as_deref(),
-            Some("xrandr --listmonitors")
+        assert!(
+            loaded.unknown_keys.is_empty(),
+            "targets is a known key even though nothing reads it yet"
         );
         // The escape hatch is present, so nothing is refused.
         assert_eq!(loaded.config.backend_refusal(&[]), None);

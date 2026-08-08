@@ -1,27 +1,10 @@
-//! The one production implementor of the Sync Engine seam.
+//! The one production implementor of the Sync Engine seam, and the only module in
+//! kith allowed to say "Syncthing".
 //!
-//! This is the only module in kith allowed to say "Syncthing". Everything it
-//! learns — folder ids, device ids, introducer flags, event types — stops here.
-//!
-//! kith never launches, embeds, configures or supervises the daemon. Every
-//! surviving Syncthing wrapper adapts a separately-running daemon; the one that
-//! owned the process aged worst and died. That rule has no exceptions, including
-//! "just for onboarding".
-//!
-//! ## What this module writes, and what it refuses to
-//!
-//! Every configuration write is a read-modify-write of the daemon's own JSON:
-//! the object comes back from the daemon, kith changes the keys it owns, and the
-//! whole object goes back. Fields kith has never heard of survive untouched,
-//! which is the point — the daemon's config belongs to the Person, and a wrapper
-//! that rewrites it wholesale is a wrapper that eventually eats someone's setup.
-//!
-//! kith's writes are scoped to: the folders it created or adopted, the `devices`
-//! array of those folders, device entries for Devices a Person admitted, and the
-//! introducer flag on those entries. It never touches the GUI block, global
-//! options, `defaults/*`, or a folder it does not own — and it never calls
-//! `/rest/system/restart` or `/rest/system/shutdown`, because config writes have
-//! applied live since the config API was rebuilt in v1.12.
+//! kith never launches, embeds or supervises the daemon. Every configuration write
+//! is a read-modify-write of the daemon's own JSON, scoped to the folders kith
+//! created or adopted and the device entries for Devices a Person admitted, so
+//! fields kith has never heard of survive untouched.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,8 +24,7 @@ use super::{
 /// The lowest daemon version whose REST semantics we rely on.
 const VERSION_FLOOR: &str = "1.23.0";
 
-/// Globs the daemon owns inside a Circle root. Answered through
-/// `SyncEngine::reserved_paths` so these spellings never climb above the seam.
+/// Globs the daemon owns inside a Circle root.
 const RESERVED: &[&str] = &[
     ".stfolder",
     ".stversions/**",
@@ -53,8 +35,6 @@ const RESERVED: &[&str] = &[
     "*.sync-conflict-*",
 ];
 
-/// Circle ids are `kith-` plus eight random base32 characters — never derived
-/// from the Circle's name, because the name is mutable and the id is not.
 const CIRCLE_ID_PREFIX: &str = "kith-";
 const CIRCLE_ID_ENTROPY: usize = 8;
 
@@ -65,20 +45,13 @@ const LOCAL_SCRATCH_IGNORE: &str = "(?d).kith/local";
 /// How long one long poll waits before the daemon answers with an empty batch.
 const EVENT_TIMEOUT_SECS: u64 = 60;
 
-/// The change feed's subscription. Naming the types is what keeps the daemon's
-/// ring buffer full of events kith cares about instead of events it discards:
-/// an unfiltered subscription overflows sooner, and an overflow costs a rescan.
-///
-/// Some of these have no home in the seam's four-variant `Change` yet
-/// (`StateChanged`, `FolderCompletion`, `PendingFoldersChanged`, `ConfigSaved`,
-/// `FolderErrors`). They stay subscribed because they are the subscription
-/// ADR-0002 §5 fixed, and because `ConfigSaved` carries the folder list this
-/// module needs to attribute presence to Circles.
+/// The change feed's subscription. Filtered so the daemon's ring buffer fills with
+/// events kith cares about; an overflow costs a rescan.
 const EVENT_FILTER: &str = "ItemFinished,LocalIndexUpdated,RemoteIndexUpdated,StateChanged,\
 FolderSummary,FolderCompletion,DeviceConnected,DeviceDisconnected,PendingDevicesChanged,\
 PendingFoldersChanged,ConfigSaved,FolderErrors";
 
-/// Reconnection backoff while the engine is unreachable (ADR-0002 §5).
+/// Reconnection backoff while the engine is unreachable.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -108,13 +81,7 @@ impl SyncthingEngine {
         }
     }
 
-    /// Find the running daemon's address and API key without ever writing to its
-    /// configuration.
-    ///
-    /// kith reads what the daemon already has; if credentials are absent or
-    /// rejected, that is reported to the Person rather than repaired, because
-    /// silently rewriting another program's config is how wrappers earn their
-    /// reputation.
+    /// Find the running daemon's address and API key, never writing to its config.
     pub fn discover() -> Result<Credentials, SyncError> {
         for path in Self::config_candidates() {
             let Ok(xml) = std::fs::read_to_string(&path) else {
@@ -148,12 +115,6 @@ impl SyncthingEngine {
         out
     }
 
-    // ── HTTP ─────────────────────────────────────────────────────────────
-    //
-    // One place maps transport and status codes into the closed `SyncError`, so
-    // there is exactly one answer to "what does a 403 mean" and it is the
-    // answer §6 requires: `Unauthorized`, reported, never repaired.
-
     async fn send(
         &self,
         method: reqwest::Method,
@@ -177,22 +138,17 @@ impl SyncthingEngine {
         })?;
 
         let status = resp.status().as_u16();
-        // Read the body whatever the status: the daemon puts its reason in
-        // there as plain text, and a reason is the difference between "the
-        // engine said no" and a message a Person can act on.
+        // Read the body whatever the status: the daemon puts its reason in there
+        // as plain text.
         let text = resp
             .text()
             .await
             .map_err(|e| SyncError::Engine(e.to_string()))?;
 
         match status {
-            // Config writes answer 200 with an empty body. That is a success,
-            // not a parse failure.
+            // Config writes answer 200 with an empty body: a success, not a parse failure.
             200..=299 if text.trim().is_empty() => Ok(Value::Null),
             200..=299 => serde_json::from_str(&text).map_err(|e| SyncError::Engine(e.to_string())),
-            // Never auto-repaired. kith does not rewrite credentials it did not
-            // issue, so this travels up as-is and the Person is told where the
-            // key was read from.
             401 | 403 => Err(SyncError::Unauthorized),
             404 => Err(SyncError::NotFound),
             other => Err(SyncError::Engine(format!("HTTP {other}: {}", text.trim()))),
@@ -215,17 +171,14 @@ impl SyncthingEngine {
         self.send(reqwest::Method::DELETE, path, None).await
     }
 
-    // ── config read-modify-write ─────────────────────────────────────────
-
     /// One Circle's folder configuration as the daemon holds it, or `NotFound`.
     async fn folder(&self, circle: &CircleId) -> Result<Value, SyncError> {
         self.get(&format!("/rest/config/folders/{}", escape(&circle.0)))
             .await
     }
 
-    /// Write a folder back after changing the keys kith owns. Everything else in
-    /// the object — including keys this kith has never heard of — rides along
-    /// untouched, which is the whole discipline.
+    /// Write a folder back after changing the keys kith owns; everything else in
+    /// the object rides along untouched.
     async fn put_folder(&self, circle: &CircleId, folder: &Value) -> Result<(), SyncError> {
         self.put(&format!("/rest/config/folders/{}", escape(&circle.0)), folder)
             .await
@@ -234,12 +187,8 @@ impl SyncthingEngine {
 
     /// Give a peer Device an entry in the daemon's device list if it has none.
     ///
-    /// An entry that already exists is left exactly as it is: it may predate
-    /// kith, and its addresses, compression and rate limits are the Person's
-    /// settings, not ours. The one thing kith insists on for an entry it
-    /// creates is `autoAcceptFolders: false` — the daemon's own default may be
-    /// `true` (wp-sync set it globally, ADR-0002 §7) and kith accepts Circles
-    /// explicitly or not at all.
+    /// An existing entry is left exactly as it is: it may predate kith and its
+    /// settings are the Person's.
     async fn ensure_device(&self, device: &DeviceId, name: &str) -> Result<(), SyncError> {
         let path = format!("/rest/config/devices/{}", escape(&device.0));
         match self.get(&path).await {
@@ -253,11 +202,7 @@ impl SyncthingEngine {
     }
 
     /// Pin an address the Invite carried, so a joiner can reach the Steward on a
-    /// network where discovery does not.
-    ///
-    /// Added alongside `dynamic` rather than replacing it: the hint is what the
-    /// Steward's Device looked like when the code was printed, and discovery has
-    /// to keep working when that stops being true.
+    /// network where discovery does not. Added alongside `dynamic`, never replacing it.
     async fn set_device_address(&self, device: &DeviceId, address: &str) -> Result<(), SyncError> {
         let path = format!("/rest/config/devices/{}", escape(&device.0));
         let mut entry = self.get(&path).await?;
@@ -281,12 +226,9 @@ impl SyncthingEngine {
         .map(|_| ())
     }
 
-    /// Build a Circle's folder object from the daemon's own folder defaults and
-    /// then impose ADR-0002 §2's recipe on top.
-    ///
-    /// Starting from the defaults rather than from `{}` is deliberate: the
-    /// folder schema gains fields with every release, and a hand-built object
-    /// would hand the daemon a zero for every field kith has not heard of.
+    /// Build a Circle's folder object from the daemon's own folder defaults, then
+    /// impose kith's recipe on top — the schema gains fields every release, and a
+    /// hand-built object would zero every one kith has not heard of.
     async fn folder_from_recipe(
         &self,
         id: &CircleId,
@@ -314,10 +256,7 @@ impl SyncEngine for SyncthingEngine {
             .and_then(|s| s.as_str())
             .unwrap_or_default()
             .to_string();
-        Ok(EngineHealth {
-            reachable: true,
-            version,
-        })
+        Ok(EngineHealth { version })
     }
 
     async fn local_device(&self) -> Result<DeviceId, SyncError> {
@@ -334,15 +273,8 @@ impl SyncEngine for SyncthingEngine {
 
     /// Create a Circle: one folder, at `root`, shared with nobody yet.
     ///
-    /// **On being the Circle's introducer.** The daemon has no self-introducer
-    /// flag and no folder-scoped one: the flag lives on *peer* device entries
-    /// and means "copy this peer's device lists to me". The creating Device is
-    /// the introducer precisely by flagging nobody (ADR-0002 §3), so there is
-    /// nothing to write here — which is also why the Circle's Steward Device is
-    /// recorded above the seam in `circle.toml`'s `founder_device` and never
-    /// read back out of the daemon's config.
-    ///
-    /// Nothing else in the daemon's configuration is touched.
+    /// The creating Device becomes the introducer precisely by flagging nobody, so
+    /// there is nothing to write for it here.
     async fn create_circle(&self, name: &str, root: &Path) -> Result<CircleRef, SyncError> {
         let me = self.local_device().await?;
         let id = CircleId(mint_circle_id());
@@ -367,36 +299,27 @@ impl SyncEngine for SyncthingEngine {
 
     /// Joiner, phase 1: register the Steward's Device and knock.
     ///
-    /// Adding the entry *is* the knock — the two daemons connect, the Steward's
-    /// daemon does not know this Device, and it appears in their pending list.
-    /// There is no separate "request" call.
-    ///
-    /// `autoAcceptFolders` is never enabled. Acceptance is phase 2 and it is
-    /// explicit, so the joiner chooses the root and no global default is touched.
+    /// Adding the entry *is* the knock: the two daemons connect and this Device
+    /// appears in the Steward's pending list. There is no separate "request" call.
     async fn begin_join(&self, invite: &InviteTicket) -> Result<(), SyncError> {
         self.ensure_device(&invite.steward_device, "").await?;
         if let Some(address) = &invite.address {
             self.set_device_address(&invite.steward_device, address).await?;
         }
-        // The Steward's Device is this Device's one introducer: it is where the
-        // rest of the Circle's Devices will be learned from.
+        // The Steward's Device is where the rest of the Circle's Devices are learned from.
         self.set_introducer(&invite.steward_device, true).await
     }
 
     /// Joiner, phase 2: the Circle was offered back; place it at `root`.
     ///
-    /// Accepting an offered folder is adding it to this daemon's config with the
-    /// offered id — there is no "accept" endpoint, and that is the reason kith
-    /// can put the bytes wherever the Person said instead of wherever the daemon
-    /// would have guessed.
+    /// There is no "accept" endpoint — accepting is adding the folder to this
+    /// daemon's config with the offered id, which is why kith picks the root.
     async fn complete_join(&self, offer: &CircleOffer, root: &Path) -> Result<CircleRef, SyncError> {
         let me = self.local_device().await?;
         self.ensure_device(&offer.from, "").await?;
 
-        // The offer may have been reconstructed from the Invite rather than read
-        // off the daemon, in which case it carries no label. Prefer what the
-        // offering Device actually said; fall back to the Circle id, never to a
-        // guess at what the Circle might be called.
+        // An offer reconstructed from the Invite carries no label; fall back to the
+        // Circle id rather than to a guess at what the Circle might be called.
         let name = if offer.label.is_empty() {
             self.get("/rest/cluster/pending/folders")
                 .await
@@ -434,12 +357,8 @@ impl SyncEngine for SyncthingEngine {
         Ok(map_pending_folders(&v))
     }
 
-    /// Admit a knocking Device into a Circle.
-    ///
-    /// Two writes, both scoped: an entry for the Device if it has none, and the
-    /// Device appended to this one folder's `devices` array. Deliberate, never
-    /// automatic — this is the gate that runs on the gatekeeper's own hardware
-    /// and it is the only Role promise kith can actually keep (ADR-0002 §4).
+    /// Admit a knocking Device into a Circle: an entry for the Device if it has
+    /// none, and the Device appended to this one folder's `devices` array.
     async fn admit(&self, circle: &CircleId, request: &JoinRequest) -> Result<(), SyncError> {
         let mut folder = self.folder(circle).await?;
         self.ensure_device(&request.device, &request.name).await?;
@@ -454,16 +373,8 @@ impl SyncEngine for SyncthingEngine {
         self.put_folder(circle, &folder).await
     }
 
-    /// Remove a Device from a Circle.
-    ///
-    /// Only the Circle's `devices` array is touched. That is enough for the
-    /// de-introduction cascade — a Member that learned of this Device by
-    /// introduction drops it once the introducer stops offering it any shared
-    /// folder — and it leaves the Device's own entry alone, because the same
-    /// Device may be in another Circle and its entry may predate kith.
-    ///
-    /// Forward-looking only: bytes already on that Device stay there, and the
-    /// cascade lands as each Member next connects to the introducer.
+    /// Remove a Device from a Circle: only the Circle's `devices` array is touched,
+    /// which is enough for the de-introduction cascade.
     async fn expel(&self, circle: &CircleId, device: &DeviceId) -> Result<(), SyncError> {
         let mut folder = self.folder(circle).await?;
         let Some(devices) = folder.get_mut("devices").and_then(Value::as_array_mut) else {
@@ -477,13 +388,8 @@ impl SyncEngine for SyncthingEngine {
         self.put_folder(circle, &folder).await
     }
 
-    /// Stop replicating a Circle.
-    ///
-    /// **Local bytes are kept.** Dropping the folder from the daemon's config
-    /// removes it from the cluster and touches not one file on disk — the
-    /// Circle's contents, its `.stfolder` marker and its archived versions are
-    /// all still there afterwards. Deleting content is a decision for a Person
-    /// and a different surface, never a side effect of leaving.
+    /// Stop replicating a Circle. Local bytes are kept: dropping the folder from
+    /// the daemon's config touches not one file on disk.
     async fn leave(&self, circle: &CircleId) -> Result<(), SyncError> {
         // The daemon answers a delete of an unknown folder with 200. Ask first,
         // so leaving a Circle this engine never replicated says so.
@@ -493,16 +399,8 @@ impl SyncEngine for SyncthingEngine {
             .map(|_| ())
     }
 
-    /// Flag or unflag a peer Device as *this* Device's introducer.
-    ///
-    /// Device-scoped, not Circle-scoped: the daemon has no way to say "introduce
-    /// me for this folder only", so two People sharing two Circles get device
-    /// lists propagated for both. Additive and harmless, and the place the
-    /// mapping leaks (ADR-0002 §3).
-    ///
-    /// Never two introducers and never mutual — that rule is enforced above the
-    /// seam, where the Circle's Steward Device is known. This method flags the
-    /// one Device it is given.
+    /// Flag or unflag a peer Device as *this* Device's introducer. Device-scoped,
+    /// not Circle-scoped: the daemon offers no folder-scoped introduction.
     async fn set_introducer(&self, device: &DeviceId, flag: bool) -> Result<(), SyncError> {
         let path = format!("/rest/config/devices/{}", escape(&device.0));
         let mut entry = self.get(&path).await?;
@@ -510,19 +408,14 @@ impl SyncEngine for SyncthingEngine {
             return Err(SyncError::NotFound);
         }
         entry["introducer"] = json!(flag);
-        // An entry kith flags is an entry kith is about to be introduced by, and
-        // a daemon whose global default is `autoAcceptFolders: true` would start
-        // taking folders from it unasked.
+        // A daemon whose global default is `autoAcceptFolders: true` would start
+        // taking folders from an introducer unasked.
         entry["autoAcceptFolders"] = json!(false);
         self.put(&path, &entry).await.map(|_| ())
     }
 
-    /// Peer Devices sharing a Circle, with presence.
-    ///
-    /// Never returns this Device. That is why `PeerDevice::introducer` is a
-    /// cross-check and not an answer: the introducer flags nobody, so on the
-    /// Steward's own Device the flag sits on no peer at all, and the one Device
-    /// that could have carried it is the one this method omits.
+    /// Peer Devices sharing a Circle, with presence. Never returns this Device,
+    /// which is why `PeerDevice::introducer` is a cross-check and not an answer.
     async fn devices(&self, circle: &CircleId) -> Result<Vec<PeerDevice>, SyncError> {
         let folder = self.folder(circle).await?;
         let me = self.local_device().await?;
@@ -562,21 +455,13 @@ impl SyncEngine for SyncthingEngine {
         Ok(map_status(&db, peers))
     }
 
-    /// Subscribe to the change feed from `resume`, or from now.
-    ///
-    /// The long poll, the cursor bookkeeping and the reconnection backoff all
-    /// live inside the returned stream: a caller holds a `Stream<Item =
-    /// Envelope>` and never learns that a daemon went away and came back.
-    ///
-    /// A gap in the event ids, a cursor from a previous daemon run, or a lost
-    /// connection surfaces as `Change::Desynced` rather than as a silent hole.
-    /// Callers re-scan the tree instead of trusting deltas they did not receive.
+    /// Subscribe to the change feed from `resume`, or from now; lost continuity
+    /// surfaces as `Change::Desynced` rather than as a silent hole.
     async fn observe(&self, resume: Option<Cursor>) -> Result<Self::Changes, SyncError> {
         let (tx, rx) = tokio::sync::mpsc::channel(FEED_BUFFER);
 
         // The feed gets its own client: a long poll outlives any sane timeout on
-        // the request/response client, and a hung daemon must still time out
-        // rather than wedge the feed forever.
+        // the request/response client, but a hung daemon must still time out.
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(EVENT_TIMEOUT_SECS + 30))
             .build()
@@ -597,41 +482,29 @@ impl SyncEngine for SyncthingEngine {
     }
 
     /// Archived versions the daemon holds for one path.
-    ///
-    /// This and [`restore`](Self::restore) are the real mitigation behind
-    /// Roles-as-policy: nothing stops a Member deleting bytes their Device
-    /// already holds, so the answer is recovery rather than permission. Every
-    /// *other* Device kept the previous versions, because versioning archives
-    /// remote-originated changes and deletes.
     async fn versions(&self, circle: &CircleId, path: &RelPath) -> Result<Vec<Version>, SyncError> {
         match self
             .get(&format!("/rest/folder/versions?folder={}", escape(&circle.0)))
             .await
         {
             Ok(v) => Ok(map_versions(&v, path)),
-            // A Circle whose folder carries no versioner holds no archived
-            // versions — a true answer to the question asked. That the recipe is
-            // missing is a `kith doctor` finding, not a failure of this call.
+            // A folder with no versioner holds no archived versions — a true
+            // answer, and a `kith doctor` finding rather than a failure here.
             Err(SyncError::Engine(msg)) if msg.contains("no versioner") => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
 
-    /// Put one archived version back.
-    ///
-    /// The restored file replicates to the whole Circle as an ordinary new
-    /// version, including onto the Device that did the damage. That is the
-    /// honest answer to "what if someone deletes everything": not prevention —
-    /// restoration, on any surviving Member's say-so.
+    /// Put one archived version back; it replicates to the whole Circle as an
+    /// ordinary new version.
     async fn restore(
         &self,
         circle: &CircleId,
         path: &RelPath,
         version: &Version,
     ) -> Result<(), SyncError> {
-        // The archived timestamp must go back exactly as it was listed: the
-        // daemon matches it against the timestamp it wrote into the archived
-        // file's name, and a timestamp rendered in another zone matches nothing.
+        // The archived timestamp goes back exactly as listed: the daemon matches
+        // it against the archived file's name, and another zone matches nothing.
         let mut body = serde_json::Map::new();
         body.insert(path.0.clone(), Value::String(version.archived_at.clone()));
 
@@ -643,8 +516,7 @@ impl SyncEngine for SyncthingEngine {
             .await?;
 
         // The daemon answers 200 whatever happened: an empty object means the
-        // bytes are back, anything else is a per-path reason. Reporting it is
-        // the difference between a recovery and a Person believing in one.
+        // bytes are back, anything else is a per-path reason.
         if let Some(reason) = restore_failure(&outcome) {
             return Err(SyncError::Engine(reason));
         }
@@ -652,11 +524,8 @@ impl SyncEngine for SyncthingEngine {
     }
 }
 
-// ── the change feed ──────────────────────────────────────────────────────
-
-/// The stream handed back by [`SyncEngine::observe`]. Nothing but a receiver:
-/// all the work happens in [`Feed::run`] on its own task, so a caller that stops
-/// polling applies backpressure instead of losing events.
+/// The stream handed back by [`SyncEngine::observe`]. Nothing but a receiver, so a
+/// caller that stops polling applies backpressure instead of losing events.
 struct ChangeFeed {
     rx: tokio::sync::mpsc::Receiver<Envelope>,
 }
@@ -669,8 +538,8 @@ impl Stream for ChangeFeed {
     }
 }
 
-/// Cursor bookkeeping for the change feed, kept out of the polling loop so that
-/// losing continuity can be tested without a daemon anywhere near it.
+/// Cursor bookkeeping for the change feed, kept out of the polling loop so losing
+/// continuity is testable without a daemon.
 #[derive(Debug, Default)]
 struct Cursors {
     last: Option<u64>,
@@ -681,23 +550,17 @@ impl Cursors {
         Self { last: resume }
     }
 
-    /// Record an event id, answering whether continuity was lost before it.
-    ///
-    /// Event ids are contiguous within a subscription, so a jump means the
-    /// daemon's ring buffer overflowed while kith was away and the events in
-    /// between are gone for good.
+    /// Record an event id, answering whether continuity was lost before it: ids are
+    /// contiguous, so a jump means the daemon's ring buffer overflowed.
     fn advance(&mut self, id: u64) -> bool {
         let gap = matches!(self.last, Some(last) if id > last + 1);
         self.last = Some(id);
         gap
     }
 
-    /// Whether the daemon's own newest event id is behind our cursor.
-    ///
-    /// Event ids restart with the daemon, so a tip behind the cursor means the
-    /// daemon was restarted under us and our cursor names an event this run will
-    /// never emit. Left unnoticed it is the worst failure the feed has: the long
-    /// poll would answer with an empty batch forever and the UI would look calm.
+    /// Whether the daemon's own newest event id is behind our cursor. Ids restart
+    /// with the daemon, and unnoticed the long poll would answer `200 []` forever
+    /// while the UI looked calm — which is why the tip is probed at all.
     fn stale_against(&self, tip: u64) -> bool {
         matches!(self.last, Some(last) if tip < last)
     }
@@ -715,17 +578,15 @@ struct Feed {
 impl Feed {
     async fn run(self, resume: Option<u64>) {
         let mut cursors = Cursors::new(resume);
-        // A resumed cursor has to be proved to belong to this daemon run before
-        // it is trusted; a fresh subscription just needs a place to start.
+        // A resumed cursor must be proved to belong to this daemon run.
         let mut verify = true;
         let mut reload_circles = true;
         let mut circles_of: HashMap<String, Vec<CircleId>> = HashMap::new();
         let mut backoff = BACKOFF_MIN;
 
         loop {
-            // Which Circles a Device belongs to. Presence is per Circle in the
-            // seam and per Device on the wire, so the feed has to hold the
-            // mapping itself.
+            // Presence is per Circle in the seam and per Device on the wire, so the
+            // feed holds the mapping itself.
             if reload_circles {
                 match self.engine.get("/rest/config/folders").await {
                     Ok(v) => {
@@ -751,8 +612,7 @@ impl Feed {
                             }
                             cursors = Cursors::new(Some(tip));
                         } else if cursors.last.is_none() {
-                            // `resume: None` means "from now", not "replay the
-                            // daemon's whole ring buffer".
+                            // `resume: None` means "from now", not "replay everything".
                             cursors = Cursors::new(Some(tip));
                         }
                         verify = false;
@@ -769,16 +629,10 @@ impl Feed {
 
             let batch = match self.poll(cursors.resume_from()).await {
                 Ok(batch) => batch,
-                // Credentials are never repaired here and never guessed. The
-                // feed ends; `health()` is where the Person is told why.
                 Err(SyncError::Unauthorized) => return,
                 Err(_) => {
                     // A dropped long poll is also how a daemon restart looks, so
-                    // the cursor is re-proved before it is used again. The retry
-                    // is against the events endpoint itself rather than the
-                    // unauthenticated health probe ADR-0002 §5 describes: it
-                    // fails identically when the daemon is absent, and it costs
-                    // one request instead of two.
+                    // the cursor is re-proved before it is used again.
                     verify = true;
                     reload_circles = true;
                     if !self.wait(&mut backoff).await {
@@ -796,8 +650,8 @@ impl Feed {
                 if cursors.advance(id) && !self.emit(id, Change::Desynced).await {
                     return;
                 }
-                // The daemon hands its whole folder list to every ConfigSaved,
-                // so somebody changing config under us costs no extra request.
+                // ConfigSaved carries the whole folder list, so config changing
+                // under us costs no extra request.
                 if event.get("type").and_then(Value::as_str) == Some("ConfigSaved") {
                     if let Some(folders) = event.pointer("/data/folders") {
                         circles_of = circle_membership(folders);
@@ -824,11 +678,8 @@ impl Feed {
             .is_ok()
     }
 
-    /// The newest event id the daemon holds for this subscription.
-    ///
-    /// A subscription the daemon has not seen before starts empty and answers
-    /// zero — which is exactly right, because a cursor from before a restart is
-    /// ahead of it and gets caught.
+    /// The newest event id the daemon holds for this subscription; an unseen
+    /// subscription answers zero, so a pre-restart cursor is caught.
     async fn tip(&self) -> Result<u64, SyncError> {
         let v = self
             .engine
@@ -861,8 +712,8 @@ impl Feed {
     }
 }
 
-/// Half the delay plus a random half, so two Devices that lose the same daemon
-/// do not spend the next minute knocking in lockstep.
+/// Half the delay plus a random half, so two Devices that lose the same daemon do
+/// not retry in lockstep.
 fn jitter(base: Duration) -> Duration {
     let half = base.as_millis() as u64 / 2;
     if half == 0 {
@@ -875,23 +726,10 @@ fn jitter(base: Duration) -> Duration {
     Duration::from_millis(half + noise % half)
 }
 
-// ── the mapping layer ────────────────────────────────────────────────────
-//
-// Free functions over `serde_json::Value` on purpose: every one of them is the
-// place a Syncthing payload becomes a kith value, and every one of them is
-// testable from a sample payload with no daemon in the room.
-
 /// `/rest/config/folders` → the Circles this engine replicates.
 ///
-/// **Not every replicated space is a Circle.** A Person runs one daemon for
-/// everything they sync, and their photo archive is not a Circle just because
-/// kith can see it: offering it as one would put an unrelated directory in the
-/// switcher, make `kith add` ambiguous, and — worst — let `kith invite` hand a
-/// stranger a code to a folder nobody meant to share. ADR-0002 §2 fixes the two
-/// marks that make a folder kith's: the `kith-` id kith mints at creation, and,
-/// for a space adopted in place under §7 (which keeps its original id), the
-/// `.kith/` directory kith wrote into the tree. Anything carrying neither belongs
-/// to some other program and is left alone.
+/// Not every replicated space is a Circle: only a `kith-` id or a `.kith/`
+/// directory in the tree marks a folder as kith's. Anything else is left alone.
 fn map_folders(v: &Value) -> Vec<CircleRef> {
     v.as_array()
         .map(|folders| {
@@ -918,11 +756,8 @@ fn map_folders(v: &Value) -> Vec<CircleRef> {
         .unwrap_or_default()
 }
 
-/// `/rest/cluster/pending/devices` → Devices currently knocking.
-///
-/// The field names are read in both spellings the daemon has used: they were
-/// lower-case, went upper-case for part of the 1.29 series, and came back. This
-/// is the churn the seam exists to absorb, and absorbing it costs three lines.
+/// `/rest/cluster/pending/devices` → Devices currently knocking. Field names are
+/// read in both spellings: part of the 1.29 series capitalised them.
 fn map_pending_devices(v: &Value) -> Vec<JoinRequest> {
     v.as_object()
         .map(|pending| {
@@ -971,8 +806,8 @@ fn offered_label(pending: &Value, circle: &CircleId, from: &DeviceId) -> Option<
         .filter(|label| !label.is_empty())
 }
 
-/// A Circle's folder plus the daemon's device list and connection table → the
-/// peers sharing it. This Device is never among them.
+/// A Circle's folder plus the daemon's device list and connection table → the peers
+/// sharing it. This Device is never among them.
 fn map_peer_devices(
     folder: &Value,
     entries: &Value,
@@ -1022,19 +857,15 @@ fn map_status(db: &Value, peers: Vec<PeerCompletion>) -> CircleStatus {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string(),
-        // The Circle's Items as the whole Circle sees them, not just the ones
-        // that have landed here — a Member who has synced nothing is still
-        // looking at a Circle with things in it.
+        // The whole Circle's Items, not just the ones that landed here.
         items: number("globalFiles"),
         bytes_needed: number("needBytes"),
         peers,
     }
 }
 
-/// `/rest/folder/versions` → the archived versions of one path.
-///
-/// `archived_at` carries the daemon's own rendering of the timestamp verbatim,
-/// because that exact string is what [`SyncEngine::restore`] has to hand back.
+/// `/rest/folder/versions` → the archived versions of one path. `archived_at` is the
+/// daemon's own rendering verbatim, because that exact string goes back to restore.
 fn map_versions(v: &Value, path: &RelPath) -> Vec<Version> {
     v.get(&path.0)
         .and_then(Value::as_array)
@@ -1061,14 +892,8 @@ fn restore_failure(outcome: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// One engine event, in whatever `Change`s the seam can carry.
-///
-/// The seam's `Change` has four variants and the daemon has dozens of event
-/// types, so this is a narrowing and says so out loud. `StateChanged`,
-/// `FolderCompletion`, `FolderErrors` and `PendingFoldersChanged` have no
-/// variant to land in: scanning state and per-peer progress are read from
-/// [`SyncEngine::status`] instead, and a Circle offered back to a joiner is read
-/// from the daemon's pending folders when phase 2 runs.
+/// One engine event, in whatever `Change`s the seam can carry. A deliberate
+/// narrowing: event types with no variant to land in are dropped, not invented.
 fn map_event(event: &Value, circles_of: &HashMap<String, Vec<CircleId>>) -> Vec<Change> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
     let data = event.get("data").unwrap_or(&Value::Null);
@@ -1079,7 +904,6 @@ fn map_event(event: &Value, circles_of: &HashMap<String, Vec<CircleId>>) -> Vec<
     };
 
     match kind {
-        // Bytes landed at a path, and the daemon named the path.
         "ItemFinished" => match (circle(), data.get("item").and_then(Value::as_str)) {
             (Some(circle), Some(item)) => vec![Change::Path {
                 circle,
@@ -1110,8 +934,7 @@ fn map_event(event: &Value, circles_of: &HashMap<String, Vec<CircleId>>) -> Vec<
                 return Vec::new();
             };
             let connected = kind == "DeviceConnected";
-            // Presence is per Circle in the seam and per Device on the wire. A
-            // Device in no Circle of ours is not a peer and says nothing.
+            // A Device in no Circle of ours is not a peer and says nothing.
             circles_of
                 .get(device)
                 .map(|circles| {
@@ -1143,9 +966,8 @@ fn map_event(event: &Value, circles_of: &HashMap<String, Vec<CircleId>>) -> Vec<
     }
 }
 
-/// A change the engine reported without naming a path. The Circle root stands
-/// for "something in here moved; re-read it" — the seam has no other carrier,
-/// and a caller that re-reads is never wrong, only occasionally early.
+/// A change the engine reported without naming a path: the Circle root stands for
+/// "something in here moved; re-read it".
 fn circle_wide(circle: CircleId) -> Change {
     Change::Path {
         circle,
@@ -1181,23 +1003,17 @@ fn shared_devices(folder: &Value) -> Vec<DeviceId> {
         .unwrap_or_default()
 }
 
-// ── writing the daemon's own shapes ──────────────────────────────────────
-
-/// ADR-0002 §2's folder recipe, imposed on a folder object without disturbing
-/// anything else in it.
+/// kith's folder recipe, imposed on a folder object without disturbing anything
+/// else in it.
 fn apply_recipe(folder: &mut Value, id: &CircleId, name: &str, root: &Path) {
     folder["id"] = json!(id.0);
-    // The label is the Circle's name and may change; the id never does and is
-    // never derived from it.
     folder["label"] = json!(name);
     folder["path"] = json!(root.to_string_lossy());
-    // Every Member contributes — that is the wedge. Curator topologies deferred.
     folder["type"] = json!("sendreceive");
     // Imports and Actions show up without anybody asking for a rescan.
     folder["fsWatcherEnabled"] = json!(true);
     folder["maxConflicts"] = json!(10);
-    // The recovery net, and the only enforcement behind Roles-as-policy: five
-    // versions, thirty days, on every Device but the one that made the change.
+    // The recovery net behind Roles-as-policy.
     folder["versioning"] = json!({
         "type": "simple",
         "params": { "keep": "5", "cleanoutDays": "30" },
@@ -1213,17 +1029,12 @@ fn shared_with(device: &DeviceId) -> Value {
     json!({ "deviceID": device.0, "introducedBy": "", "encryptionPassword": "" })
 }
 
-/// A device entry for a Device kith is admitting or knocking at.
-///
-/// `autoAcceptFolders` is written explicitly rather than left to the daemon's
-/// default, which may well be `true`: wp-sync set that default globally, and
-/// inheriting it would silently accept folders from this Device forever.
+/// A device entry for a Device kith is admitting or knocking at. `autoAcceptFolders`
+/// is written explicitly because the daemon's own default may well be `true`.
 fn new_device_entry(device: &DeviceId, name: &str) -> Value {
     json!({
         "deviceID": device.0,
         "name": name,
-        // Discovery handles addressing; introduction does not propagate address
-        // changes anyway.
         "addresses": ["dynamic"],
         "introducer": false,
         "skipIntroductionRemovals": false,
@@ -1232,20 +1043,16 @@ fn new_device_entry(device: &DeviceId, name: &str) -> Value {
     })
 }
 
-/// `kith-` plus eight random base32 characters.
-///
-/// Taken from the random tail of a ULID, which is Crockford base32 already —
-/// the id is a handle, never a name, and nothing may be read back out of it.
+/// `kith-` plus eight random base32 characters, never derived from the Circle's
+/// name: the id is a handle and nothing may be read back out of it.
 fn mint_circle_id() -> String {
     let ulid = ulid::Ulid::generate().to_string();
     let tail = &ulid[ulid.len().saturating_sub(CIRCLE_ID_ENTROPY)..];
     format!("{CIRCLE_ID_PREFIX}{tail}")
 }
 
-// ── small helpers ────────────────────────────────────────────────────────
-
-/// A field under either of two spellings. The daemon has renamed fields between
-/// releases; the seam is where that stops mattering.
+/// A field under either of two spellings, because the daemon has renamed fields
+/// between releases.
 fn either(value: &Value, first: &str, second: &str) -> Option<String> {
     value
         .get(first)
@@ -1254,9 +1061,8 @@ fn either(value: &Value, first: &str, second: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Percent-encode a path segment or query value. Folder ids on adopted installs
-/// are whatever the Person's previous client chose, so they are escaped rather
-/// than assumed to be URL-safe.
+/// Percent-encode a path segment or query value: an adopted folder's id is whatever
+/// the Person's previous client chose, never assumed URL-safe.
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -1270,8 +1076,7 @@ fn escape(value: &str) -> String {
     out
 }
 
-/// Escape a key for a JSON pointer, where `~` and `/` are the two reserved
-/// characters. Device ids contain neither; folder ids on adopted installs might.
+/// Escape a key for a JSON pointer, where `~` and `/` are reserved.
 fn pointer(key: &str) -> String {
     key.replace('~', "~0").replace('/', "~1")
 }
@@ -1309,10 +1114,7 @@ mod tests {
           </gui>
         </configuration>"#;
 
-    /// Sample payloads are the daemon's own, captured from Syncthing v2.1.2 and
-    /// trimmed to the fields the seam reads. Nothing here needs a daemon: the
-    /// mapping is the part that breaks when the REST surface churns, so the
-    /// mapping is the part that is pinned down.
+    // Sample payloads are the daemon's own, captured from Syncthing v2.1.2.
     const ME: &str = "M7KZXLB-HFVBLRE-JB7FCKY-RYD72WT-QEQ4347-Y44X3BX-OQZVGRM-LDNS2QO";
     const PEER: &str = "MKNSEL2-Z7BKMYM-EYGID6P-5HU44J5-AN5TPZ6-WNKU3JA-24PUCIK-632SIQ2";
     const STRANGER: &str = "LIZXMUU-KBDARMK-77NWE7L-6GO6LRW-CKU2VOE-Q6CVPAW-I4JOBXH-B5AAAQU";
@@ -1379,7 +1181,6 @@ mod tests {
       ]
     }"#;
 
-    /// One long poll's worth of events, in the order the daemon emitted them.
     const EVENT_BATCH: &str = r#"[
       { "id": 66, "globalID": 67, "type": "ItemFinished",
         "data": { "action": "update", "error": null, "folder": "kith-7QM4XKC2",
@@ -1423,17 +1224,14 @@ mod tests {
 
     #[test]
     fn reserved_paths_cover_the_daemons_own_artefacts() {
-        // These spellings must never be duplicated above the seam.
         assert!(RESERVED.contains(&".stfolder"));
         assert!(RESERVED.contains(&"*.sync-conflict-*"));
     }
 
     #[test]
     fn a_folder_list_becomes_circles() {
-        // The adopted wp-sync folder keeps its original id (ADR-0002 §7), so the
-        // only thing that marks it as kith's is the `.kith/` directory adoption
-        // wrote into its tree. That has to be a real directory for the mapping to
-        // find it, which is what this fixture builds.
+        // An adopted folder keeps its original id, so only a real `.kith/`
+        // directory in its tree marks it as kith's.
         let adopted = std::env::temp_dir().join(format!("kith-adopted-{}", std::process::id()));
         std::fs::create_dir_all(adopted.join(".kith")).unwrap();
         let folders = FOLDERS.replace("/home/ana/Wallpapers", &adopted.display().to_string());
@@ -1443,18 +1241,13 @@ mod tests {
         assert_eq!(circles[0].id, CircleId("kith-7QM4XKC2".into()));
         assert_eq!(circles[0].name, "Wallpapers");
         assert_eq!(circles[0].root, PathBuf::from("/home/ana/Pictures/Circle"));
-        // An adopted wp-sync folder has no label, and an unnamed Circle is a
-        // real state rather than a reason to skip it.
+        // An unnamed Circle is a real state, not a reason to skip it.
         assert_eq!(circles[1].id, CircleId("wallpapers".into()));
         assert_eq!(circles[1].name, "");
 
         let _ = std::fs::remove_dir_all(&adopted);
     }
 
-    /// A Person runs one daemon for everything they sync. A folder kith neither
-    /// created nor adopted is somebody else's, and calling it a Circle would put
-    /// it in the switcher, make `kith add` ambiguous and — worst — let
-    /// `kith invite` hand out a code to a directory nobody meant to share.
     #[test]
     fn a_folder_kith_never_touched_is_not_a_circle() {
         let circles = map_folders(&json_of(FOLDERS));
@@ -1473,8 +1266,7 @@ mod tests {
 
     #[test]
     fn pending_devices_survive_the_daemon_renaming_its_own_fields() {
-        // The 1.29 series shipped these keys capitalised. A Person on that build
-        // still gets a name and a time, not two empty strings.
+        // The 1.29 series shipped these keys capitalised.
         let capitalised = json_of(
             r#"{ "LIZXMUU-KBDARMK-77NWE7L-6GO6LRW-CKU2VOE-Q6CVPAW-I4JOBXH-B5AAAQU":
                  { "Time": "2026-08-07T16:18:57Z", "Name": "Bo's laptop" } }"#,
@@ -1492,7 +1284,6 @@ mod tests {
             &DeviceId(STRANGER.into()),
         );
         assert_eq!(label.as_deref(), Some("Wallpapers"));
-        // An offer from a Device that never made one is absent, not empty.
         assert_eq!(
             offered_label(
                 &json_of(PENDING_FOLDERS),
@@ -1574,8 +1365,7 @@ mod tests {
         // One local index update, two named files, two changes.
         assert!(matches!(&changes[1], Change::Path { path, .. } if path.0 == "sunset.png"));
         assert!(matches!(&changes[2], Change::Path { path, .. } if path.0 == "dawn.png"));
-        // A remote index update names no file: the Circle root stands for
-        // "something moved in here, re-read it".
+        // A remote index update names no file, so the Circle root stands in.
         assert!(matches!(
             &changes[3],
             Change::Path { circle: c, path } if *c == circle && path.0.is_empty()
@@ -1601,8 +1391,6 @@ mod tests {
 
     #[test]
     fn presence_is_reported_once_per_circle_the_device_shares() {
-        // The same Device in two Circles is two Presence facts, because Presence
-        // is per Circle above the seam and per Device on the wire.
         let two = json_of(&FOLDERS.replace("\"wallpapers\"", "\"kith-SECOND01\"").replace(
             r#"{ "deviceID": "M7KZXLB-HFVBLRE-JB7FCKY-RYD72WT-QEQ4347-Y44X3BX-OQZVGRM-LDNS2QO",
             "introducedBy": "", "encryptionPassword": "" }
@@ -1655,9 +1443,6 @@ mod tests {
 
     #[test]
     fn a_cursor_from_a_previous_daemon_run_surfaces_as_desynced() {
-        // Event ids restart with the daemon, so a tip behind our cursor means
-        // our cursor names an event this run will never emit. Unnoticed, the
-        // long poll would answer empty forever and the UI would look calm.
         let cursors = Cursors::new(Some(9_001));
         assert!(cursors.stale_against(12));
         assert!(!cursors.stale_against(9_001));
@@ -1670,15 +1455,12 @@ mod tests {
     fn versions_are_listed_for_one_path_and_carry_the_daemons_own_timestamp() {
         let versions = map_versions(&json_of(VERSIONS), &RelPath("hello.txt".into()));
         assert_eq!(versions.len(), 2);
-        // Verbatim: restore matches this string against the timestamp the daemon
-        // wrote into the archived file's name, and the same instant rendered in
-        // another zone matches nothing.
+        // Verbatim: restore matches this string against the archived file's name.
         assert_eq!(versions[0].archived_at, "2025-01-01T12:00:00+05:30");
         assert_eq!(
             map_versions(&json_of(VERSIONS), &RelPath("sub/pic.png".into())).len(),
             1
         );
-        // A path the engine holds nothing for is an empty answer, not a failure.
         assert!(map_versions(&json_of(VERSIONS), &RelPath("gone.png".into())).is_empty());
     }
 
@@ -1720,8 +1502,6 @@ mod tests {
 
     #[test]
     fn a_device_entry_kith_writes_never_accepts_circles_on_its_own() {
-        // The daemon's own default for this may be `true` — wp-sync set it
-        // globally — so kith writes the answer instead of inheriting it.
         let entry = new_device_entry(&DeviceId(PEER.into()), "Bo's phone");
         assert_eq!(entry["autoAcceptFolders"], json!(false));
         assert_eq!(entry["introducer"], json!(false));
@@ -1740,7 +1520,6 @@ mod tests {
 
     #[test]
     fn ids_are_escaped_before_they_reach_a_url() {
-        // An adopted folder's id is whatever the Person's previous client chose.
         assert_eq!(escape("kith-7QM4XKC2"), "kith-7QM4XKC2");
         assert_eq!(escape("holiday photos/2026"), "holiday%20photos%2F2026");
         assert_eq!(pointer("a/b~c"), "a~1b~0c");

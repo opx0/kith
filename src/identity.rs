@@ -1,14 +1,8 @@
-//! This Person's Identity on this Device.
-//!
-//! kith issues no accounts and keeps no registry. A Person exists because other
-//! People have chosen to trust them, so an Identity is minted locally, never
-//! escrowed, and never recoverable from anywhere else. Losing every Device that
-//! holds it means losing it — kith has no recovery authority because it has no
-//! authority at all, and `kith init` says so out loud.
+//! This Person's Identity on this Device — minted locally, never escrowed, and
+//! not recoverable from anywhere else.
 //!
 //! The Device half of the pair is not stored here: a Device's identity *is* the
-//! Sync Engine's device id (there is no second ID space), so it is asked for,
-//! never recorded.
+//! Sync Engine's device id, so it is asked for, never recorded.
 
 use std::path::PathBuf;
 
@@ -16,11 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::PersonId;
 
-/// The current on-disk schema. Bumped only by a breaking change.
 const SCHEMA: u32 = 1;
 
-/// One of exactly two files kith cannot rebuild from the synced tree. The cache
-/// is disposable; this is not.
+/// One of exactly two files kith cannot rebuild from the synced tree.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Identity {
     pub schema: u32,
@@ -44,7 +36,7 @@ pub enum IdentityError {
 }
 
 /// `$XDG_DATA_HOME/kith/identity.toml` — data, not state: losing it loses the
-/// Person, which is not what a state directory promises.
+/// Person.
 pub fn path() -> Result<PathBuf, IdentityError> {
     directories::BaseDirs::new()
         .map(|b| b.data_dir().join("kith/identity.toml"))
@@ -62,9 +54,10 @@ pub fn load() -> Result<Option<Identity>, IdentityError> {
     }
 }
 
-/// Mint this Person and bind them to this Device. Refuses to overwrite: there is
-/// no rename in v0.1, and silently replacing an Identity would orphan every
-/// attribution that already names it.
+/// Mint this Person and bind them to this Device.
+///
+/// Refuses to overwrite: replacing an Identity would orphan every attribution
+/// that already names it.
 pub fn create(display_name: &str, now: &str) -> Result<Identity, IdentityError> {
     let display_name = sanitise(display_name);
     if display_name.is_empty() {
@@ -91,9 +84,8 @@ pub fn create(display_name: &str, now: &str) -> Result<Identity, IdentityError> 
     Ok(identity)
 }
 
-/// Write 0600. The file is not a secret in the cryptographic sense — kith holds
-/// no key material of its own — but it is this Person, and a shared machine
-/// should not hand it to the next account over.
+/// Write 0600 — a shared machine should not hand this Person to the next
+/// account over.
 fn write_private(path: &PathBuf, text: &str) -> Result<(), IdentityError> {
     let tmp = path.with_extension("toml.kith-tmp");
     std::fs::write(&tmp, text)?;
@@ -106,9 +98,8 @@ fn write_private(path: &PathBuf, text: &str) -> Result<(), IdentityError> {
     Ok(())
 }
 
-/// Display names are rendered inside the admission prompt, where a Person
-/// decides whether to let a stranger in. Strip the characters that could make
-/// that prompt lie: bidi overrides, controls and newlines.
+/// Strip the characters that could make the admission prompt lie: bidi
+/// overrides, controls and newlines.
 fn sanitise(name: &str) -> String {
     name.chars()
         .filter(|c| {

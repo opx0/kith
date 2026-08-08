@@ -1,28 +1,12 @@
-//! Membership claims — one file per Device, written only by the Device it names.
+//! Membership claims — one file per Device, at `.kith/members/<device-id>.toml`.
 //!
-//! A claim is one Device saying *I am here, and I speak for this Person*
-//! (ADR-0004 §5). It lives at `<circle root>/.kith/members/<device-id>.toml`, and
-//! the filename is the key: the Device named there is the only Device that ever
-//! writes that file. That single-writer rule is the whole reason the layout is
-//! Device-keyed rather than Person-keyed — two Members never race on one path, so
-//! a conflict copy here is evidence rather than a merge problem (§8), and a
-//! Person's second Device in v0.3 adds a second file instead of contending for
-//! this one.
+//! **Single writer:** the filename is the key, and the Device it names is the only
+//! Device that ever writes that file — so two Members never race on one path.
 //!
-//! **Keyed by Device, attributed to Person.** Nothing above the seam identifies a
-//! Member by Device: `person` lives *inside* the claim, and folding the claims by
-//! it is what turns a pile of Devices into People (`derive_people`).
-//!
-//! A claim is a **descriptor**, not a record log: ADR-0004's append-only rule
-//! (W2) governs `.kith/items/**`, and a descriptor is read-modify-write under its
-//! §3 protocol — write beside, `fsync`, `rename`. Rewriting a claim to carry a new
-//! display name, to re-assert after a conflict copy, or to stamp `left_at` on the
-//! way out is the format working as designed, not a loophole.
-//!
-//! **A claim is asserted, never proven.** Any admitted Device can write a file
-//! naming any Person; the transport authenticates a certificate and nothing above
-//! it signs anything (ADR-0004 §5). Device-keying removes the accident, not the
-//! forger, and no surface built on this module may imply otherwise.
+//! Keyed by Device, attributed to Person: `person` lives inside the claim, and
+//! folding claims by it is what turns Devices into People ([`derive_people`]). A
+//! claim is a descriptor, not a record log, so rewriting one is the format working
+//! as designed — and it is asserted, never proven, since nothing signs it.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -32,11 +16,10 @@ use crate::domain::{MembershipClaim, Person};
 use crate::identity::Identity;
 use crate::store::descriptors::write_atomic;
 
-/// The claim schema this build writes. A claim carrying a higher one was written
-/// by a newer kith: it is read best-effort and never rewritten (identity spec
-/// §7.6), which is also what protects the reserved `[steward]` and `[grants]`
-/// tables that v0.2 adds — this build round-trips five fields plus `left_at` and
-/// would silently drop anything else it rewrote.
+/// The claim schema this build writes.
+///
+/// A claim carrying a higher one is read best-effort and never rewritten, since
+/// this build round-trips six fields and would silently drop anything else.
 const SCHEMA: u32 = 1;
 
 /// Where a Circle keeps its Membership claims, relative to the Circle root.
@@ -46,45 +29,27 @@ fn members_dir(root: &Path) -> PathBuf {
     root.join(MEMBERS_DIR)
 }
 
-/// Publish this Device's Membership claim into a Circle.
-///
-/// Called by `create` right after the Circle exists and by `join` the moment
-/// `complete_join` returns — a Member should be nameable the instant they appear.
-/// It is also idempotent, because it runs on every start: the common path reads
-/// one file and writes nothing. `asserted` is deliberately *not* compared, since
-/// it differs at every read and comparing it would rewrite the claim — and wake
-/// every Member's engine — on every start.
-///
-/// The decision, per identity spec §4.4:
+/// Publish this Device's Membership claim into a Circle, idempotently.
 ///
 /// | Existing claim | Action |
 /// |---|---|
-/// | absent, or unreadable | write it — this Device is its rightful writer |
+/// | absent, or unreadable | write it |
 /// | ours, same display name, no `left_at`, no conflict copies | nothing |
-/// | ours, display name differs | rewrite whole, `asserted` = now |
-/// | ours, carries `left_at` | rewrite whole — publishing *is* saying "I am here" |
-/// | names a different Person | **refuse** (`PermissionDenied`) |
+/// | ours, display name differs, or carries `left_at` | rewrite whole |
+/// | names a different Person | refuse (`PermissionDenied`) |
 ///
-/// The refusal is §7.2: two People behind one Sync Engine daemon would otherwise
-/// rewrite each other's claim on every start, forever, and replicate the flapping
-/// to the whole Circle. kith would rather show a Circle a problem than generate
-/// churn in it.
-///
-/// *Gap noted.* §4.4's table predates `left_at`, and says nothing about a claim
-/// that carries one. Leaving the tombstone in place would make a Device that
-/// rejoined a Circle it once left permanently "left", so the row above clears it:
-/// a claim is this Device's current statement about itself, and publishing is the
-/// statement.
+/// `asserted` is deliberately not compared: it differs at every read, so
+/// comparing it would rewrite the claim — and wake every Member's engine — on
+/// every start. The refusal keeps two People behind one daemon from rewriting
+/// each other's claim forever.
 pub fn publish(root: &Path, device: &str, id: &Identity, now: &str) -> io::Result<()> {
     validate_device(device)?;
 
     let dir = members_dir(root);
     let copies = copies_of(&dir, device)?;
 
-    // Every readable copy of our own claim has to agree that it is ours before we
-    // touch anything — including a conflict copy, because a copy naming somebody
-    // else *is* the shared-daemon collision, and deleting it would destroy the
-    // evidence `kith doctor` reports.
+    // Every readable copy has to agree the Device is ours before we touch
+    // anything: a copy naming somebody else is the shared-daemon collision.
     for copy in &copies {
         let Some(claim) = &copy.claim else { continue };
         if claim.person != id.person {
@@ -112,13 +77,11 @@ pub fn publish(root: &Path, device: &str, id: &Identity, now: &str) -> io::Resul
 
     let canonical = copies.iter().find(|c| c.canonical);
     let stale = match canonical.and_then(|c| c.claim.as_ref()) {
-        // A tombstoned or renamed claim is out of date; so is one we cannot read,
-        // and a claim nobody can read publishes nothing.
         Some(claim) => claim.display_name != id.display_name || claim.left_at.is_some(),
         None => true,
     };
-    // Re-assert when a conflict copy exists, so the file we are about to keep is
-    // demonstrably the newest statement before the copy goes (ADR-0004 §8).
+    // Re-assert when a conflict copy exists, so the file we keep is demonstrably
+    // the newest statement before the copy goes.
     let has_conflict_copy = copies.iter().any(|c| !c.canonical);
 
     if stale || has_conflict_copy {
@@ -134,8 +97,7 @@ pub fn publish(root: &Path, device: &str, id: &Identity, now: &str) -> io::Resul
         write_atomic(&dir.join(format!("{device}.toml")), &claim)?;
     }
 
-    // Only the owning Device ever deletes a copy of its own claim. One we could
-    // not read is left where it is: it is unreadable evidence, not a duplicate.
+    // One we could not read is left where it is: unreadable evidence, not a duplicate.
     for copy in copies.iter().filter(|c| !c.canonical && c.claim.is_some()) {
         match std::fs::remove_file(&copy.path) {
             Ok(()) => {}
@@ -149,20 +111,10 @@ pub fn publish(root: &Path, device: &str, id: &Identity, now: &str) -> io::Resul
 
 /// Stamp `left_at` into this Device's own claim — the Member leaving, in one write.
 ///
-/// A tombstone in a file only this Device ever writes, never a deletion: a
-/// delete-then-recreate is exactly the pattern that produces conflict copies, and
-/// the claim must survive to say *left* rather than vanish into *was never here*.
-/// It is also what keeps this Person's name on the Items they added, which is why
-/// a claim is never deleted even after the Device is gone.
-///
-/// `asserted` is refreshed in the same write (circles spec §3.9.2). It has to be:
-/// `asserted` is the claim's only freshness field, so a departure that did not
-/// refresh it would lose the tie-break against this Person's other statements and
-/// simply not take.
-///
-/// Returns `NotFound` when this Device published no claim here — there is nothing
-/// to stamp, and saying so is more honest than reporting a departure that left no
-/// trace for anyone to read.
+/// A tombstone rather than a deletion, so the claim survives to say *left* and to
+/// keep this Person's name on the Items they added. `asserted` is refreshed in
+/// the same write, or the departure would lose the freshness tie-break and simply
+/// not take. `NotFound` when this Device published no claim here.
 pub fn stamp_left(root: &Path, device: &str, now: &str) -> io::Result<()> {
     validate_device(device)?;
 
@@ -194,17 +146,9 @@ pub fn stamp_left(root: &Path, device: &str, now: &str) -> io::Result<()> {
 
 /// Every Membership claim in a Circle, one per Device.
 ///
-/// Conflict copies are absorbed rather than resolved (ADR-0004 §8): two files
-/// under one Device id are two machines asserting one Device identity, never two
-/// People disagreeing, so the newest `asserted` is simply read and the other is
-/// left for its owner to clean up. A file whose `device` field contradicts its
-/// filename is ignored — the filename is the key, and that removes the only
-/// ambiguity a merge would have had to resolve.
-///
-/// **Never fails on one bad file.** An unreadable or malformed claim is skipped
-/// and the rest of the Circle still resolves, because one hand-edited file must
-/// not blank a Members screen. Only a Circle whose `.kith/members` cannot be
-/// listed at all is an error, and a Circle that has none yet is simply empty.
+/// Conflict copies are absorbed by reading the newest `asserted`, a claim whose
+/// `device` contradicts its filename is ignored, and one unreadable file is
+/// skipped rather than allowed to blank a Members screen.
 pub fn read_all(root: &Path) -> io::Result<Vec<MembershipClaim>> {
     let dir = members_dir(root);
     let entries = match std::fs::read_dir(&dir) {
@@ -215,8 +159,7 @@ pub fn read_all(root: &Path) -> io::Result<Vec<MembershipClaim>> {
     };
 
     // Keyed by writing Device, so a conflict copy competes only with the claim it
-    // is a copy of. BTreeMap: the order a Circle resolves in must not depend on
-    // the order the filesystem hands out directory entries.
+    // is a copy of. BTreeMap, so directory-entry order cannot decide anything.
     let mut newest: BTreeMap<String, (MembershipClaim, bool)> = BTreeMap::new();
 
     for entry in entries.flatten() {
@@ -225,8 +168,8 @@ pub fn read_all(root: &Path) -> io::Result<Vec<MembershipClaim>> {
         let Some(device) = claim_file_device(name) else { continue };
 
         let Some(claim) = read_claim(&entry.path()) else { continue };
-        // The filename is the key: a claim that disagrees with it names a Device
-        // that is not its writer, so it is not a claim about anything.
+        // The filename is the key, so a claim that disagrees with it is not a
+        // claim about anything.
         if claim.device != device {
             continue;
         }
@@ -243,22 +186,11 @@ pub fn read_all(root: &Path) -> io::Result<Vec<MembershipClaim>> {
     Ok(newest.into_values().map(|(claim, _)| claim).collect())
 }
 
-/// Fold claims into the People a Circle actually has.
+/// Fold claims into the People a Circle actually has, grouping by `person`.
 ///
-/// This is the Person/Device split in one function: claims are grouped by
-/// `person`, and a Person is in the Circle because at least one claim names them.
-/// v0.1 writes one claim per Person and this fold is exercised with one, but it is
-/// written for N — which is exactly why v0.3's second Device is one more file and
-/// not a migration.
-///
-/// - **Display name** comes from the claim with the newest `asserted`, ties broken
-///   by the smaller Device id (ADR-0004 §5). A claim whose `asserted` is
-///   unparseable never wins that tie-break: a malformed timestamp is not a fresh
-///   one.
-/// - **A Member has left** when *every* claim carrying their `person` has
-///   `left_at` (circles spec §2.2). One claim with it and one without means a
-///   Device stopped, not that the Person did. Their claims stay in the tree
-///   either way, so their name keeps resolving on the Items they added forever.
+/// The display name comes from the claim with the newest `asserted`, ties broken
+/// by the smaller Device id; a Member has left only when *every* claim naming
+/// them carries `left_at`, since one Device stopping is not the Person leaving.
 pub fn derive_people(claims: &[MembershipClaim]) -> Vec<Person> {
     let mut by_person: BTreeMap<&str, Vec<&MembershipClaim>> = BTreeMap::new();
     for claim in claims {
@@ -287,8 +219,7 @@ pub fn derive_people(claims: &[MembershipClaim]) -> Vec<Person> {
         })
         .collect();
 
-    // Two People may share a display name — there is no registry to forbid it —
-    // so the PersonId settles the order and every Device sorts alike.
+    // Two People may share a display name, so the PersonId settles the order.
     people.sort_by(|a, b| {
         a.display_name
             .cmp(&b.display_name)
@@ -297,14 +228,11 @@ pub fn derive_people(claims: &[MembershipClaim]) -> Vec<Person> {
     people
 }
 
-// ── internals ────────────────────────────────────────────────────────
-
 /// One file that claims to be a Device's Membership claim, canonical or a copy.
 struct Copy {
     path: PathBuf,
-    /// `None` when the file could not be read or parsed. Kept in the list anyway:
-    /// an unreadable claim of ours still means our claim needs rewriting, and an
-    /// unreadable conflict copy is evidence we must not delete.
+    /// `None` when the file could not be read; kept in the list anyway, because
+    /// an unreadable copy is evidence we must not delete.
     claim: Option<MembershipClaim>,
     canonical: bool,
 }
@@ -338,11 +266,8 @@ fn copies_of(dir: &Path, device: &str) -> io::Result<Vec<Copy>> {
 
 /// The Device a claim filename names: the segment before the first `.`.
 ///
-/// The same rule ADR-0004 §4.3 gives for record logs, and it is what makes a
-/// conflict copy readable as *the same claim* rather than as a stray file —
-/// everything after the Device id is meaningful only to the engine that wrote it.
-/// Anything not ending in `.toml` is not a claim, which is also what keeps the
-/// descriptor protocol's `.toml.kith-tmp` staging file out of every read.
+/// That is what makes a conflict copy readable as the same claim, and requiring
+/// `.toml` is what keeps the `.toml.kith-tmp` staging file out of every read.
 fn claim_file_device(name: &str) -> Option<&str> {
     if !name.ends_with(".toml") {
         return None;
@@ -358,7 +283,7 @@ fn read_claim(path: &Path) -> Option<MembershipClaim> {
     toml::from_str(&text).ok()
 }
 
-/// Newest `asserted` wins; ties go to the smaller Device id (ADR-0004 §5).
+/// Newest `asserted` wins; ties go to the smaller Device id.
 fn supersedes(candidate: &MembershipClaim, held: &MembershipClaim) -> bool {
     let (c, h) = (asserted_at(candidate), asserted_at(held));
     if c != h {
@@ -368,8 +293,7 @@ fn supersedes(candidate: &MembershipClaim, held: &MembershipClaim) -> bool {
 }
 
 /// The same rule between two copies of *one* Device's claim, where the Device id
-/// tie-break cannot separate them: prefer the file the Device actually writes
-/// over the copy the transport minted.
+/// cannot separate them: prefer the file the Device actually writes.
 fn supersedes_copy(candidate: (&MembershipClaim, bool), held: (&MembershipClaim, bool)) -> bool {
     let (c, h) = (asserted_at(candidate.0), asserted_at(held.0));
     if c != h {
@@ -378,22 +302,18 @@ fn supersedes_copy(candidate: (&MembershipClaim, bool), held: (&MembershipClaim,
     candidate.1 && !held.1
 }
 
-/// `asserted` parsed for comparison, rather than compared as text.
+/// `asserted` parsed for comparison, because `…:02Z` and `…:02.117Z` sort
+/// backwards as strings.
 ///
-/// RFC 3339 renders a whole second without a fraction, so `…:02Z` and `…:02.117Z`
-/// sort backwards as strings. `None` — an unparseable timestamp from a hand-edit
-/// or a future format — sorts oldest, so a claim kith cannot date never wins a
-/// freshness tie-break against one it can.
+/// `None` sorts oldest, so a claim kith cannot date never wins a freshness tie.
 fn asserted_at(claim: &MembershipClaim) -> Option<jiff::Timestamp> {
     claim.asserted.parse::<jiff::Timestamp>().ok()
 }
 
 /// A Device id that cannot be a filename cannot be a claim.
 ///
-/// The filename *is* the key (§3.2), so kith refuses to write a claim it could
-/// not read back as this Device's own — and a separator or a `..` in a Device id
-/// would write a file naming some other Device, or none, which is the one thing
-/// the single-writer rule exists to make impossible.
+/// A separator or a `..` would write a file naming some other Device, or none —
+/// the one thing the single-writer rule exists to make impossible.
 fn validate_device(device: &str) -> io::Result<()> {
     let usable = !device.is_empty()
         && device
@@ -456,10 +376,7 @@ mod tests {
         std::fs::write(&path, toml::to_string_pretty(claim).unwrap()).unwrap();
     }
 
-    // ── derive_people ────────────────────────────────────────────────
-
-    /// The load-bearing fold: a Person is the *set* of claims naming them, which
-    /// is what makes v0.3's second Device one more file instead of a migration.
+    /// A Person is the *set* of claims naming them.
     #[test]
     fn two_devices_of_one_person_fold_to_one_person() {
         let ana = PersonId::generate();
@@ -500,8 +417,6 @@ mod tests {
         assert!(people.is_empty(), "a Member who left is not a Member");
     }
 
-    /// One claim with `left_at` and one without means a Device stopped, not that
-    /// the Person did (circles spec §2.2).
     #[test]
     fn one_device_leaving_does_not_remove_a_person_who_has_another() {
         let ana = PersonId::generate();
@@ -531,8 +446,6 @@ mod tests {
         assert_eq!(people[0].display_name, "Ana Ruiz");
     }
 
-    /// Sub-second precision must not sort backwards: `…:02Z` is *older* than
-    /// `…:02.117Z`, which a string comparison gets exactly wrong.
     #[test]
     fn freshness_is_a_timestamp_comparison_and_not_a_string_one() {
         let ana = PersonId::generate();
@@ -557,8 +470,6 @@ mod tests {
         assert_eq!(people[0].display_name, "from K5J");
     }
 
-    /// A hand-edited timestamp must not out-rank a real one, or a broken claim
-    /// would decide what a Person is called.
     #[test]
     fn an_undatable_claim_never_wins_the_freshness_tie_break() {
         let ana = PersonId::generate();
@@ -569,8 +480,6 @@ mod tests {
 
         assert_eq!(people[0].display_name, "dated");
     }
-
-    // ── publish ──────────────────────────────────────────────────────
 
     #[test]
     fn publish_writes_a_claim_the_circle_can_read() {
@@ -589,8 +498,7 @@ mod tests {
         assert_eq!(derive_people(&claims).len(), 1);
     }
 
-    /// The common path costs one read. Re-asserting on every start would wake
-    /// every Member's engine for a file that did not change.
+    /// Re-asserting on every start would wake every Member's engine for nothing.
     #[test]
     fn publishing_an_unchanged_claim_rewrites_nothing() {
         let root = circle("idempotent");
@@ -615,8 +523,7 @@ mod tests {
         assert_eq!(claims[0].asserted, "2026-08-09T22:00:00Z");
     }
 
-    /// §7.2: two People behind one daemon. The second must never rewrite the
-    /// first's claim, or the flapping replicates to the whole Circle.
+    /// Two People behind one daemon: the second must never rewrite the first's claim.
     #[test]
     fn publish_refuses_a_claim_that_names_a_different_person() {
         let root = circle("contradiction");
@@ -631,8 +538,6 @@ mod tests {
         assert_eq!(claims[0].person, ana.person, "Ana's claim is untouched");
     }
 
-    /// The single-writer rule is a filename rule, so a Device id that is not a
-    /// filename is refused rather than written under a name that is not it.
     #[test]
     fn publish_refuses_a_device_id_that_could_name_another_file() {
         let root = circle("traversal");
@@ -658,8 +563,6 @@ mod tests {
         assert_eq!(read_all(&root).unwrap()[0].schema, SCHEMA + 1, "left as found");
     }
 
-    // ── stamp_left ───────────────────────────────────────────────────
-
     #[test]
     fn stamp_left_tombstones_the_claim_and_refreshes_asserted() {
         let root = circle("leave");
@@ -676,8 +579,7 @@ mod tests {
         assert!(derive_people(&claims).is_empty());
     }
 
-    /// Publishing is this Device saying "I am here", so it clears a tombstone it
-    /// wrote earlier — otherwise a Device that rejoined would read as left forever.
+    /// Publishing is this Device saying "I am here", so it clears its own tombstone.
     #[test]
     fn publishing_after_leaving_clears_the_tombstone() {
         let root = circle("rejoin");
@@ -700,9 +602,6 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
     }
 
-    // ── read_all ─────────────────────────────────────────────────────
-
-    /// ADR-0004 §8: absorb, never resolve. Reading the copy is the whole handling.
     #[test]
     fn a_conflict_copy_is_absorbed_by_reading_the_newest_assertion() {
         let root = circle("conflict");
@@ -724,8 +623,6 @@ mod tests {
         assert_eq!(derive_people(&claims).len(), 1);
     }
 
-    /// Only the owning Device touches either file, and it re-asserts first so the
-    /// claim it keeps is demonstrably the newest statement.
     #[test]
     fn the_owning_device_re_asserts_and_deletes_its_conflict_copy() {
         let root = circle("absorb");
@@ -744,8 +641,6 @@ mod tests {
         assert_eq!(read_all(&root).unwrap()[0].asserted, "2026-08-09T22:00:00Z");
     }
 
-    /// A copy naming somebody else is the shared-daemon collision. Deleting it
-    /// would destroy the evidence `kith doctor` reports.
     #[test]
     fn a_conflict_copy_naming_another_person_is_kept_as_evidence() {
         let root = circle("collision");
@@ -777,7 +672,6 @@ mod tests {
         assert!(read_all(&root).unwrap().is_empty(), "the filename is the key");
     }
 
-    /// One hand-edited file must not blank a Members screen.
     #[test]
     fn one_unreadable_claim_does_not_cost_the_rest_of_the_circle() {
         let root = circle("malformed");
@@ -798,8 +692,6 @@ mod tests {
         assert_eq!(claims[0].display_name, "Ana");
     }
 
-    /// The descriptor protocol's staging file lives beside the target, so every
-    /// read has to know it is not a claim.
     #[test]
     fn staging_files_and_stray_names_are_not_claims() {
         assert_eq!(claim_file_device("P56IOI7-XZWICQ2.toml"), Some("P56IOI7-XZWICQ2"));

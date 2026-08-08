@@ -1,61 +1,22 @@
-//! Content hashing — the binding between an Item and the bytes representing it.
+//! Content hashing — the one place kith turns bytes into a digest.
 //!
-//! One digest per file, computed once and reused three ways (collections spec
-//! §2.2): the `add`/`bind` record's `hash` field, the dedup key, and the
-//! thumbnail cache key `<content-hash>-<class>.png`. Those three must agree byte
-//! for byte on every Device, which is why the rendering lives in exactly one
-//! place and nothing outside this module ever calls `blake3` directly.
-//!
-//! **The hash is a binding, never an identity** (ADR-0004 §4.1). An Item's
-//! identity is its ULID and survives a move, a rename and a re-encode; only the
-//! binding changes. Two Members who add the same wallpaper converge on one tile
-//! because their bytes hash the same, not because their Items do.
-//!
-//! BLAKE3 in its default configuration: unkeyed, no derivation context, 32-byte
-//! output, lowercase hex behind a `b3:` prefix. Computed over the file's bytes
-//! and nothing else — no filename, no mtime, no mode.
-//!
-//! This is **not** a security boundary. Attribution in kith is convention, not
-//! cryptography (ADR-0004 §5), so a collision-resistant hash is chosen for
-//! correctness under accident, not under attack. What it does buy is ADR-0004
-//! §9's affordable O(bytes) rebuild: BLAKE3 runs at GB/s, so losing the cache
-//! costs seconds per 5 GB and never costs an Item.
+//! The digest binds an Item to its bytes; it is never the Item's identity, and
+//! it is not a security boundary.
 
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-/// The rendering prefix. Self-describing, so a record written by a future kith
-/// that changes algorithms is recognisably *not* ours rather than silently
-/// mis-compared.
+/// The rendering prefix, so a digest written by a future kith that changes
+/// algorithms is recognisably *not* ours rather than silently mis-compared.
 const PREFIX: &str = "b3:";
 
-/// Characters of digest shown to a Person. 48 bits is far past the point where a
-/// human would eyeball a collision, and short enough to fit a `doctor` line.
+/// Characters of digest shown to a Person.
 const SHORT_LEN: usize = 12;
 
-/// 1 MiB per read (collections §2.2). Large enough that the syscall cost
-/// disappears against the hashing, small enough to stay off the stack and out of
-/// the way of a Collection being walked entry by entry.
 const BUF_LEN: usize = 1024 * 1024;
 
 /// Hash a file's contents, rendered as `b3:` + 64 lowercase hex characters.
-///
-/// Streamed rather than read whole: Collections hold thousands of wallpapers and
-/// a 4K PNG is tens of megabytes, so `read_to_end` would peak at the size of the
-/// largest Item for no gain.
-///
-/// Errors are the caller's to interpret — a vanished source mid-walk, a
-/// permission denial and a directory passed by mistake all arrive here as
-/// ordinary `io::Error`, and the import plan renders them as
-/// `Verdict::Unreadable` rather than failing the run (collections §3.2).
-///
-/// *Gap noted:* collections §2.2 asks for `blake3::update_mmap_rayon` above
-/// 16 MiB. That method is behind the crate's `mmap` + `rayon` features, which
-/// this build does not enable, and Cargo.toml is not this module's to change.
-/// Single-threaded streaming still runs at GB/s, so the wedge is unaffected;
-/// switching the large-file path on is a one-line change here once the features
-/// are on.
 pub fn hash_file(path: &Path) -> std::io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Hasher::new();
@@ -75,9 +36,6 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
 }
 
 /// Hash bytes already in memory.
-///
-/// For the small reads that never touch a file: an 8 KiB sniff prefix, a
-/// generated thumbnail, a test fixture.
 pub fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Hasher::new();
     hasher.update(bytes);
@@ -86,11 +44,8 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 
 /// The first 12 characters of the digest, for display.
 ///
-/// Takes the full rendered hash and drops the prefix. Lenient about a missing
-/// prefix and about a truncated or malformed digest, because this is called from
-/// render paths — `doctor` printing a duplicate copy, a `--json` envelope — and
-/// a display helper that panics on a peer's malformed record would turn a
-/// cosmetic problem into a dead Gallery.
+/// Lenient about a missing prefix and a malformed digest: this renders data a
+/// peer wrote, and must never panic on it.
 pub fn short(hash: &str) -> &str {
     let digest = hash.strip_prefix(PREFIX).unwrap_or(hash);
     // Char boundaries, not bytes: the input may be anything a peer wrote.
@@ -103,11 +58,8 @@ pub fn short(hash: &str) -> &str {
 
 /// Whether a string is a hash kith itself could have written.
 ///
-/// Records arrive from other Devices, and a hash is used as a *filename* — the
-/// thumbnail cache key is `<content-hash>-<class>.png` (ADR-0003 §5). A digest
-/// checked here can never contain a path separator or a `..`, so the cache
-/// cannot be walked out of by a malformed record. Callers that only display a
-/// hash do not need this; callers that build a path from one do.
+/// A digest that passes here cannot contain a path separator or a `..`, so the
+/// thumbnail cache cannot be walked out of by a malformed record.
 pub fn is_well_formed(hash: &str) -> bool {
     match hash.strip_prefix(PREFIX) {
         Some(digest) => {
@@ -118,12 +70,6 @@ pub fn is_well_formed(hash: &str) -> bool {
 }
 
 /// Incremental hashing, for bytes that are being written as they are hashed.
-///
-/// The import's write phase hashes the copy as it lands (collections §3.3
-/// step 2) so that a source changing underneath the run is caught before the
-/// record is written, rather than by a reconcile hours later. Exposing this
-/// keeps the `b3:` rendering in one place instead of letting each caller
-/// `format!` its own.
 pub struct Hasher(blake3::Hasher);
 
 impl Hasher {
@@ -135,8 +81,7 @@ impl Hasher {
         self.0.update(bytes);
     }
 
-    /// The digest so far, rendered. Does not consume the Hasher — a caller
-    /// verifying a copy wants the answer without giving up the state.
+    /// The digest so far, rendered. Does not consume the Hasher.
     pub fn finish(&self) -> String {
         format!("{PREFIX}{}", self.0.finalize().to_hex())
     }
@@ -152,11 +97,7 @@ impl Default for Hasher {
 mod tests {
     use super::*;
 
-    /// The official BLAKE3 test vectors. The empty input, and the 3-byte input
-    /// `00 01 02` from the reference `test_vectors.json`. These are the whole
-    /// point of this test module: they pin kith's rendering to the published
-    /// algorithm, so a Device on a different build cannot disagree about what
-    /// the same bytes hash to.
+    /// The official BLAKE3 test vectors: the empty input, and `00 01 02`.
     const EMPTY: &str = "b3:af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
     const THREE_BYTES: &str = "b3:e1be4d7a8ab5560aa4199eea339849ba8e293d55ca0a81006726d184519e647f";
 
@@ -193,9 +134,6 @@ mod tests {
         assert_eq!(h, h.to_lowercase(), "hex is rendered lowercase, always");
     }
 
-    /// Streaming must not depend on where the read boundaries fall — an Item
-    /// larger than the buffer has to hash the same on the Device that imported
-    /// it and the Device that received it.
     #[test]
     fn streaming_agrees_with_a_single_pass_across_buffer_boundaries() {
         for len in [BUF_LEN - 1, BUF_LEN, BUF_LEN + 1, BUF_LEN * 2 + 7] {
@@ -210,8 +148,6 @@ mod tests {
         }
     }
 
-    /// The incremental face and the one-shot face are the same hash, or the
-    /// import's verify step would reject every copy it made.
     #[test]
     fn incremental_hashing_agrees_with_one_shot() {
         let mut h = Hasher::new();
@@ -223,8 +159,6 @@ mod tests {
         assert_eq!(h.finish(), hash_bytes(b"sunset"));
     }
 
-    /// The hash binds bytes, not names. Two files with the same content are one
-    /// dedup key; the same name over different content is not.
     #[test]
     fn the_hash_is_over_bytes_and_nothing_else() {
         let a = scratch("sunset.png");
@@ -241,14 +175,11 @@ mod tests {
     fn short_drops_the_prefix_and_keeps_twelve() {
         assert_eq!(short(EMPTY), "af1349b9f5f9");
         assert_eq!(short(EMPTY).len(), SHORT_LEN);
-        // Lenient: a bare digest, already-short input, and empty all render.
         assert_eq!(short("af1349b9f5f9a1a6"), "af1349b9f5f9");
         assert_eq!(short("b3:abc"), "abc");
         assert_eq!(short(""), "");
     }
 
-    /// `short` is a display helper on data a peer wrote. It renders garbage; it
-    /// never panics on a char boundary.
     #[test]
     fn short_survives_a_malformed_hash_from_a_peer() {
         assert_eq!(short("b3:éé"), "éé");
@@ -271,8 +202,6 @@ mod tests {
         assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
     }
 
-    /// A directory reaching `hash_file` is a bug upstream, but it must arrive as
-    /// an error the import can render as `Unreadable`, not as a panic.
     #[test]
     fn a_directory_is_an_error_rather_than_a_panic() {
         let dir = scratch("a-directory");

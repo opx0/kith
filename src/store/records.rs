@@ -1,23 +1,10 @@
-//! The record logs — one append-only log per Device, per Collection (ADR-0004 §§3–6).
+//! The record logs — one append-only log per Device, per Collection.
 //!
-//! This is the layer that makes a Sidecar possible on a transport with no
-//! coordinator. Three rules from ADR-0004 §1 hold every line of it up:
-//!
-//! * **W1** — a log names its writing Device in its path, and only that Device
-//!   ever writes it. Two Members therefore never write one file, so a conflict is
-//!   not something to resolve but something that structurally cannot happen.
-//! * **W2** — logs are appended to and never rewritten, so the one remaining
-//!   conflict generator (rewrite-in-flight) is gone too.
-//! * **W3** — [`derive_items`] is a pure function of the *union* of the records.
-//!   Read order, arrival order and which copy of a conflicted file won are all
-//!   irrelevant, which is why absorbing a conflict copy is just reading one more
-//!   log rather than a merge anybody has to think about.
-//!
-//! A Sidecar is not a file (ADR-0004 §4): it is what [`derive_items`] makes of
-//! the records. Nothing in this module writes one.
-//!
-//! JSON Lines rather than TOML for the same reason: a damaged line costs exactly
-//! one record, never the log, and appending one is a single `write(2)`.
+//! A log names its writing Device in its path and only that Device ever writes
+//! it, so two Members never write one file. Logs are appended to and never
+//! rewritten, and [`derive_items`] is a pure function of the *union* of the
+//! records — so read order and arrival order are irrelevant, and absorbing a
+//! conflict copy is just reading one more log.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -28,34 +15,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{Item, ItemId, PersonId};
 
-/// The record schema this build writes and understands (ADR-0004 §11).
+/// The record schema this build writes and understands.
 ///
-/// It rides on every line rather than on the file, so a log whose tail was
-/// written by a newer kith is still fully readable up to the point where it
-/// stops being understood.
+/// It rides on every line rather than on the file, so a log whose tail a newer
+/// kith wrote is still readable up to that point.
 const SCHEMA: u32 = 1;
 
-/// How much of a log's tail is read to recover the next `seq`. ~250 bytes per
-/// record (ADR-0004 §4.2), so this covers hundreds of them without reading a
-/// large log from the start on every append.
+/// How much of a log's tail is read to recover the next `seq`.
 const TAIL_WINDOW: u64 = 64 * 1024;
 
 /// One line of one log: a fact one Device asserted about one Item.
 ///
-/// The Collection is encoded by the log's directory and the writing Device by its
-/// filename, so neither is a field (ADR-0004 §4.2).
-///
-/// `by` is **asserted, not proven**. Records are not signed and never will be in
-/// v0.1: the Sync Engine's key material is off limits (ADR-0002 §2) and kith runs
-/// no second identity system. Any admitted Device can write any path in the tree,
-/// so a `by` is believable because a human admitted that Device — the same
-/// honesty the product owes about Roles. Every surface that renders attribution
-/// says so.
-///
-/// Reserved by ADR-0004 §4.2 and deliberately unwritten here: `meta` records
-/// (titles and tags, v0.3), `facts` and `adopted` on an `add`, and `sig` on any
-/// record (v1.0). Unknown fields and unknown kinds are ignored on read and never
-/// rewritten, so a later build adds any of them without a migration.
+/// The Collection is the log's directory and the writing Device its filename, so
+/// neither is a field; `by` is asserted, not proven, because nothing is signed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Record {
@@ -71,7 +43,7 @@ pub enum Record {
         size: u64,
     },
     /// This Item's bytes are now at this path with this hash — a move, a rename
-    /// or a re-encode. The Item id is untouched: an Item survives all three.
+    /// or a re-encode, with the Item id untouched.
     Bind {
         item: ItemId,
         by: PersonId,
@@ -81,47 +53,30 @@ pub enum Record {
         size: u64,
     },
     /// Tombstone: this Item is no longer in this Collection.
-    ///
-    /// Reversible in data — the `add` still exists — and honoured by every reader
-    /// regardless of who wrote it (see [`derive_items`]).
     Remove { item: ItemId, by: PersonId, at: String },
 }
 
 impl Record {
-    /// The Item this record is about, before aliasing (ADR-0004 §4.4 step 3).
+    /// The Item this record is about, before aliasing.
     pub fn item(&self) -> &ItemId {
         match self {
             Record::Add { item, .. } | Record::Bind { item, .. } | Record::Remove { item, .. } => item,
         }
     }
 
-    /// The writing Device's wall clock. A total order, never a happens-before.
+    /// The writing Device's wall clock — a total order, never a happens-before.
     pub fn at(&self) -> &str {
         match self {
             Record::Add { at, .. } | Record::Bind { at, .. } | Record::Remove { at, .. } => at,
-        }
-    }
-
-    /// The Person the writing Device claims acted. Asserted, not proven.
-    pub fn by(&self) -> &PersonId {
-        match self {
-            Record::Add { by, .. } | Record::Bind { by, .. } | Record::Remove { by, .. } => by,
         }
     }
 }
 
 /// Append one record to *this* Device's log for `collection`, durably.
 ///
-/// The protocol is ADR-0004 §3's, exactly: open append-only, take an advisory
-/// lock, write one complete line including its `\n`, flush it to the platter,
-/// release. The lock guards the only same-Device race there is — two kith
-/// processes, say a `kith add` while the TUI deletes — because every other writer
-/// in the Circle is on another Device and writes another file (W1).
-///
-/// A log whose last line has no `\n` was torn by a local crash mid-append. This
-/// terminates it with a newline instead of truncating it: W2 forbids rewriting a
-/// log, and the alternative — appending straight onto the stump — would splice
-/// the damaged bytes onto the new record and cost two records instead of one.
+/// A log whose last line has no `\n` was torn by a local crash mid-append: it is
+/// terminated with a newline rather than truncated, so the damage costs one
+/// record instead of two and no log is ever rewritten.
 pub fn append(root: &Path, collection: &str, device: &str, rec: &Record) -> io::Result<()> {
     let path = log_path(root, collection, device)?;
     if let Some(dir) = path.parent() {
@@ -142,15 +97,12 @@ pub fn append(root: &Path, collection: &str, device: &str, rec: &Record) -> io::
     line.push('\n');
 
     // One `write_all` under the lock, and the line carries its own terminator, so
-    // no reader — local or remote — ever sees half a record. Titles cannot tear a
-    // line either: JSON escapes every control character, which is half the reason
-    // the format is JSON.
+    // no reader ever sees half a record.
     file.write_all(line.as_bytes())?;
     file.sync_data()?;
 
-    // Flushing the record is not enough the first time: a crash could otherwise
-    // leave a durable record inside a directory entry that was never written, and
-    // the first record of a log is usually the one that matters.
+    // A durable first record inside a directory entry that was never written is
+    // still a lost record.
     if is_new_log {
         if let Some(dir) = path.parent() {
             let _ = File::open(dir).and_then(|d| d.sync_all());
@@ -159,17 +111,11 @@ pub fn append(root: &Path, collection: &str, device: &str, rec: &Record) -> io::
     Ok(())
 }
 
-/// Every record in the Collection, from every Device's log.
+/// Every record in the Collection, from every Device's log, conflict copies read
+/// as ordinary logs.
 ///
-/// Conflict copies are read as ordinary logs and never resolved: W3 makes the
-/// union indifferent to which copy the engine kept, so absorbing one is free
-/// (ADR-0004 §8). Only the Device that owns a log ever deletes its conflict copy.
-///
-/// **A damaged line costs one record, never the log.** Unparseable lines, records
-/// from a newer schema and unknown kinds are skipped and the read continues —
-/// this is the whole reason the format is line-oriented. Nothing here rewrites a
-/// source file, so what was skipped survives on disk for a later kith (or a
-/// human with `$EDITOR`) to read.
+/// A damaged line costs one record, never the log: unparseable lines, newer
+/// schemas and unknown kinds are skipped and left on disk untouched.
 pub fn read_all(root: &Path, collection: &str) -> io::Result<Vec<Record>> {
     let dir = collection_dir(root, collection)?;
 
@@ -189,9 +135,8 @@ pub fn read_all(root: &Path, collection: &str) -> io::Result<Vec<Record>> {
     for log in &logs {
         let bytes = match std::fs::read(log) {
             Ok(b) => b,
-            // The engine stages and renames, and an owning Device deletes its own
-            // absorbed conflict copies: a log can vanish between the listing and
-            // the read. Every other I/O error is real and is reported.
+            // A log can vanish between the listing and the read: the engine
+            // renames, and an owning Device deletes its absorbed conflict copies.
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e),
         };
@@ -200,52 +145,30 @@ pub fn read_all(root: &Path, collection: &str) -> io::Result<Vec<Record>> {
     Ok(records)
 }
 
-/// Reduce the union of the records to the Items the Gallery shows — ADR-0004
-/// §4.4, minus the steps that need a disk walk (those belong to reconciliation).
+/// Reduce the union of the records to the Items the Gallery shows.
 ///
-/// `root` is the Collection root; record paths are relative to it and are only
-/// ever *stat*ed here, never read or hashed.
-///
-/// The rules, and why each one is what it is:
-///
-/// * **Total order** by `(at, record)`. Deterministic on every Device, and a
-///   pure function of the record set — so records read in any order reduce to
-///   the same Items.
-/// * **Alias by content hash.** Two Devices adopting the same pre-existing tree
-///   mint two Item ids for one file; the earliest `add` is canonical and the rest
-///   alias to it, so both Devices converge on one Item without talking.
-/// * **First `add` wins** for `added_by`, `added_at` and `title`; every later
-///   `add` contributes only its binding. That is what makes re-adding removed
-///   content revive the *original* Item with the original adder's name.
-/// * **Newest binding wins** for an Item's bytes.
-/// * **A tombstone wins regardless of who wrote it.** Honouring a removal
-///   conditionally on the remover's Role would make two Devices disagree about
-///   the Gallery depending on when the Membership claims reached them, and a
-///   policy check that costs convergence buys nothing because it enforces
-///   nothing (ADR-0004 §6). An `add` or `bind` stamped *later* than the tombstone
-///   revives the Item; the same instant does not.
-///
-/// An Item whose bytes have not arrived keeps its `hash` and `size` — they are
-/// what the record declares — and has **no `path`**, because a path is a claim
-/// about this Device's disk. A 250-byte record beats a 4 MB wallpaper across the
-/// wire, so metadata-without-bytes is the normal arrival state and renders as a
-/// placeholder rather than as nothing.
+/// Records are totally ordered by `at`, Items naming the same bytes alias to the
+/// earliest `add`, the first `add` supplies attribution and the newest binding
+/// the bytes, and a tombstone wins over anything not stamped strictly later. An
+/// Item whose bytes have not arrived keeps its `hash` and `size` but has no
+/// `path`, because a path is a claim about this Device's disk.
 pub fn derive_items(records: &[Record], root: &Path) -> Vec<Item> {
-    // 1. Total order (ADR-0004 §4.4 step 2). The ADR breaks ties on
-    //    `(device_id, seq)`; a reduced record set carries neither, so the
-    //    tie-break is the record's own canonical JSON — equally deterministic,
-    //    and identical on every Device that holds the record.
-    let mut ordered: Vec<(i128, String, &Record)> = records
-        .iter()
-        .map(|r| (instant(r.at()), serde_json::to_string(r).unwrap_or_default(), r))
-        .collect();
-    ordered.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    // 1. Total order. A reduced record set carries no `(device_id, seq)`, so ties
+    //    on `at` break on the record's own canonical JSON — deterministic, and
+    //    paid for only by the records that actually collide.
+    let mut ordered: Vec<(i128, &Record)> = records.iter().map(|r| (instant(r.at()), r)).collect();
+    ordered.sort_by_key(|(when, _)| *when);
+    for tied in ordered.chunk_by_mut(|a, b| a.0 == b.0) {
+        if tied.len() > 1 {
+            tied.sort_by_cached_key(|(_, r)| serde_json::to_string(r).unwrap_or_default());
+        }
+    }
 
-    // 2. Alias (step 3): the canonical Item for a hash is the one from the
-    //    earliest `add`; every other Item id naming those bytes points at it.
+    // 2. Alias: the canonical Item for a hash is the one from the earliest `add`;
+    //    every other Item id naming those bytes points at it.
     let mut canonical_for_hash: BTreeMap<&str, ItemId> = BTreeMap::new();
     let mut alias: BTreeMap<String, ItemId> = BTreeMap::new();
-    for (_, _, rec) in &ordered {
+    for (_, rec) in &ordered {
         if let Record::Add { item, hash, .. } = rec {
             if hash.is_empty() {
                 continue; // nothing to group on; leave the Item alone
@@ -262,10 +185,10 @@ pub fn derive_items(records: &[Record], root: &Path) -> Vec<Item> {
         }
     }
 
-    // 3. Apply (step 4).
+    // 3. Apply.
     let mut drafts: BTreeMap<String, Draft> = BTreeMap::new();
     let mut tombstones: BTreeMap<String, i128> = BTreeMap::new();
-    for (when, _, rec) in &ordered {
+    for (when, rec) in &ordered {
         let id = resolve(&alias, rec.item());
         match rec {
             Record::Add { by, at, title, path, hash, size, .. } => {
@@ -280,48 +203,39 @@ pub fn derive_items(records: &[Record], root: &Path) -> Vec<Item> {
                 draft.bind(*when, path, hash, *size);
             }
             Record::Bind { path, hash, size, .. } => {
-                // A binding for an Item no `add` ever introduced is not an Item:
-                // its `add` was lost or has not arrived. Nothing is invented for
-                // it; `kith doctor` is where a sequence gap gets named.
+                // A binding whose `add` was lost or has not arrived invents no
+                // Item; `kith doctor` is where a sequence gap gets named.
                 if let Some(draft) = drafts.get_mut(id.as_str()) {
                     draft.bind(*when, path, hash, *size);
                 }
             }
             Record::Remove { .. } => {
-                // Recorded whoever wrote it and whether or not its `add` is here,
-                // so the tombstone survives an `add` that arrives afterwards.
+                // Recorded whether or not its `add` is here, so the tombstone
+                // survives an `add` that arrives afterwards.
                 let latest = tombstones.entry(id.as_str().to_string()).or_insert(i128::MIN);
                 *latest = (*latest).max(*when);
             }
         }
     }
 
-    let mut items: Vec<Item> = drafts
+    // Newest first, with the Item id as a stable tie-break so two Devices print
+    // the same list. Each `added_at` is parsed once rather than per comparison.
+    let mut keyed: Vec<(i128, Item)> = drafts
         .into_values()
         .filter(|d| match tombstones.get(d.id.as_str()) {
             Some(removed_at) => d.bound_at > *removed_at, // revived, strictly later
             None => true,
         })
-        .map(|d| d.into_item(root))
+        .map(|d| (instant(&d.added_at), d.into_item(root)))
         .collect();
-
-    // Newest first, the order every surface that lists Items wants, with the
-    // Item id as a stable tie-break so two Devices print the same list.
-    items.sort_by(|a, b| {
-        instant(&b.added_at)
-            .cmp(&instant(&a.added_at))
-            .then_with(|| b.id.as_str().cmp(a.id.as_str()))
-    });
-    items
+    keyed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.id.as_str().cmp(a.1.id.as_str())));
+    keyed.into_iter().map(|(_, item)| item).collect()
 }
 
-// ── the reduction's working state ────────────────────────────────────
-
-/// One Item under construction. `binding` is the effective binding as ADR-0004
-/// §4.4 resolves it: the winning `add`/`bind`. The ADR's fallback for a winning
-/// path that is missing while a *duplicate copy* of the same bytes sits elsewhere
-/// in the tree needs a hashed disk walk, which is reconciliation's job and not a
-/// reducer's; here a missing path simply means the bytes are not on this Device.
+/// One Item under construction, `binding` being the winning `add`/`bind`.
+///
+/// A missing path simply means the bytes are not on this Device; finding a
+/// duplicate copy of them elsewhere in the tree is reconciliation's job.
 struct Draft {
     id: ItemId,
     added_by: PersonId,
@@ -338,8 +252,7 @@ struct Binding {
 }
 
 impl Draft {
-    /// Newest binding wins. Records arrive here in total order, so "newest" is
-    /// simply "last".
+    /// Newest binding wins; records arrive in total order, so "newest" is "last".
     fn bind(&mut self, when: i128, path: &str, hash: &str, size: u64) {
         self.binding = Some(Binding { path: path.to_string(), hash: hash.to_string(), size });
         self.bound_at = when;
@@ -362,9 +275,8 @@ impl Draft {
     }
 }
 
-/// Follow an alias chain to the canonical Item. Bounded, because a hand-edited
-/// log could in principle describe a cycle and a Gallery that hangs is worse than
-/// one that shows an extra tile.
+/// Follow an alias chain to the canonical Item, bounded because a hand-edited log
+/// could describe a cycle.
 fn resolve(alias: &BTreeMap<String, ItemId>, item: &ItemId) -> ItemId {
     let mut current = item.clone();
     for _ in 0..16 {
@@ -376,21 +288,19 @@ fn resolve(alias: &BTreeMap<String, ItemId>, item: &ItemId) -> ItemId {
     current
 }
 
-/// An `at` as a comparable instant. RFC 3339 strings of differing precision do
-/// not compare correctly as text, so they are parsed. A timestamp that will not
-/// parse sorts first: it is the least trustworthy thing in the set, and letting
-/// it sort last would let one damaged line mask every later record.
+/// An `at` as a comparable instant, because RFC 3339 strings of differing
+/// precision do not compare correctly as text.
+///
+/// One that will not parse sorts first, so a damaged line cannot mask every
+/// record after it.
 fn instant(at: &str) -> i128 {
     at.parse::<jiff::Timestamp>().map(|t| t.as_nanosecond()).unwrap_or(i128::MIN)
 }
 
 /// Where a record's relative path lands on this Device, if its bytes are here.
 ///
-/// Any admitted Device can write any path in the tree (ADR-0004 §5), so a record
-/// naming `../.ssh/id_ed25519` is a shape kith must expect rather than trust: a
-/// path that escapes the Collection root, or is absolute, binds nothing. Symlinks
-/// are not Items either — kith does not sync links — so only a regular file counts
-/// as arrived.
+/// Any admitted Device can write any path, so a path that escapes the Collection
+/// root or is absolute binds nothing, and only a regular file counts as arrived.
 fn local_path(root: &Path, rel: &str) -> Option<PathBuf> {
     if rel.is_empty() {
         return None;
@@ -412,8 +322,6 @@ fn local_path(root: &Path, rel: &str) -> Option<PathBuf> {
     }
 }
 
-// ── on-disk plumbing ─────────────────────────────────────────────────
-
 fn collection_dir(root: &Path, collection: &str) -> io::Result<PathBuf> {
     Ok(root.join(".kith").join("items").join(segment(collection, "Collection id")?))
 }
@@ -423,9 +331,8 @@ fn log_path(root: &Path, collection: &str, device: &str) -> io::Result<PathBuf> 
     Ok(collection_dir(root, collection)?.join(format!("{device}.jsonl")))
 }
 
-/// Ids become path segments, and a Collection id or Device id arrives from a
-/// descriptor or from the engine rather than from this module. One check keeps a
-/// malformed one from naming a file outside the Circle.
+/// Ids become path segments, so a malformed one must not name a file outside the
+/// Circle.
 fn segment<'a>(value: &'a str, what: &str) -> io::Result<&'a str> {
     let unusable = value.is_empty()
         || value == "."
@@ -441,10 +348,8 @@ fn segment<'a>(value: &'a str, what: &str) -> io::Result<&'a str> {
 /// Serialise one record as one line, stamped with the schema version and its
 /// position in this log.
 ///
-/// `seq` is per-log, monotonic and gapless from 1. Nothing in the reduction reads
-/// it — the merge is a pure function of the union and needs no sequence — but it
-/// is what lets `kith doctor` say *records 4–6 of this log are missing* instead of
-/// silently reducing a truncated log as if it were whole.
+/// Nothing in the reduction reads `seq`; it exists so `kith doctor` can name a
+/// gap rather than reduce a truncated log as if it were whole.
 fn encode(rec: &Record, seq: u64) -> io::Result<String> {
     let mut value = serde_json::to_value(rec).map_err(invalid_data)?;
     let object = value
@@ -458,10 +363,8 @@ fn encode(rec: &Record, seq: u64) -> io::Result<String> {
 /// Read a log's tail under the append lock: the `seq` to write next, and whether
 /// the file ends on a complete line.
 ///
-/// The last complete line is found within a bounded window rather than by reading
-/// the whole log, so appending stays O(1) in the log's length. If no `seq` is
-/// recoverable the count restarts at 1; a repeated `seq` is a *forked log*, which
-/// `doctor` names (ADR-0004 §8) and which costs the reduction nothing.
+/// Bounded window rather than the whole log, so appending stays O(1) in its
+/// length; if no `seq` is recoverable the count restarts at 1.
 fn tail_state(file: &mut File) -> io::Result<(u64, bool)> {
     let len = file.seek(SeekFrom::End(0))?;
     if len == 0 {
@@ -496,18 +399,14 @@ fn tail_state(file: &mut File) -> io::Result<(u64, bool)> {
     Ok((last_seq.unwrap_or(0) + 1, terminated))
 }
 
-/// Parse one log's bytes, skipping what cannot be applied and counting nothing
-/// against the rest.
+/// Parse one log's bytes, skipping what cannot be applied.
 fn read_lines(bytes: &[u8], out: &mut Vec<Record>) {
     // Lossy rather than strict: a line mangled into invalid UTF-8 must not cost
     // the records around it.
     let text = String::from_utf8_lossy(bytes);
     let mut lines: Vec<&str> = text.split('\n').collect();
     if !text.ends_with('\n') {
-        // A trailing line with no terminator was torn by a local crash
-        // mid-append. A remote reader never sees one — the engine stages incoming
-        // files and renames them into place.
-        lines.pop();
+        lines.pop(); // torn by a local crash mid-append; not a record
     }
     for line in lines {
         if let Some(rec) = parse_line(line.trim()) {
@@ -523,26 +422,22 @@ fn parse_line(line: &str) -> Option<Record> {
     let mut value: serde_json::Value = serde_json::from_str(line).ok()?;
     let object = value.as_object_mut()?;
 
-    // A record from a newer kith is left alone rather than half-applied: degraded,
-    // never broken (ADR-0004 §11). It stays on disk untouched for the upgrade.
+    // A record from a newer kith is left alone rather than half-applied.
     let v = object.get("v").and_then(serde_json::Value::as_u64).unwrap_or(SCHEMA as u64);
     if v > SCHEMA as u64 {
         return None;
     }
 
-    // ADR-0004 §4.2 prints the kind under `k`; the module contract fixes the tag
-    // as `t`. kith writes `t` and accepts either, so a line typed by hand from the
-    // ADR — or by `$EDITOR` during a repair, which the format exists to allow —
-    // still reduces.
+    // kith writes the kind as `t` and accepts `k` too, so a line typed by hand
+    // from the spec — or by `$EDITOR` during a repair — still reduces.
     if !object.contains_key("t") {
         if let Some(kind) = object.remove("k") {
             object.insert("t".to_string(), kind);
         }
     }
 
-    // An unknown kind, or a record missing a field this build needs, is skipped.
-    // Unknown *fields* are ignored by serde and survive on disk untouched, because
-    // nothing here ever rewrites a log.
+    // An unknown kind, or a record missing a field this build needs, is skipped;
+    // unknown *fields* are ignored by serde and survive on disk untouched.
     serde_json::from_value(value).ok()
 }
 
@@ -550,15 +445,11 @@ fn invalid_data<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
-/// An advisory `flock` held for one append.
+/// An advisory `flock` held for one append — two kith processes on one Device are
+/// the only race there is.
 ///
-/// Two kith processes on one Device are the only race there is (W1 gives every
-/// other writer its own file), and this is the cheapest thing that serialises
-/// them. It is declared here rather than pulled in as a dependency: one libc
-/// symbol does not earn a crate.
 /// Holds the descriptor rather than the `File` so the caller can still read its
-/// own log's tail while the lock is held. Sound because the guard is always
-/// declared after the `File` it locks and so is dropped before it.
+/// own log's tail; sound because the guard is always declared after the `File`.
 struct FileLock {
     #[cfg(unix)]
     fd: std::os::fd::RawFd,
@@ -578,16 +469,15 @@ impl FileLock {
     fn acquire(file: &File) -> io::Result<Self> {
         use std::os::fd::AsRawFd;
         let fd = file.as_raw_fd();
-        // Blocking: the other holder is another kith process writing one line, so
-        // the wait is bounded by one `write` plus one `fdatasync`.
+        // Blocking: the wait is bounded by one `write` plus one `fdatasync`.
         if unsafe { ffi::flock(fd, ffi::LOCK_EX) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Self { fd })
     }
 
-    /// v0.1 ships on Linux. Elsewhere the append is still one complete line, but
-    /// two local kith processes are not serialised — stated rather than implied.
+    /// Off Unix the append is still one complete line, but two local kith
+    /// processes are not serialised.
     #[cfg(not(unix))]
     fn acquire(_file: &File) -> io::Result<Self> {
         Ok(Self {})
@@ -610,8 +500,7 @@ mod tests {
     const ANA_DEVICE: &str = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2";
     const BEN_DEVICE: &str = "K5J2FVL-B3QTXAO-7SWNDUE-HMR4YZI-6CPGA2N-XQTLB5V-JW3EOHY-RD6MSAK";
 
-    /// A scratch Circle root under the system temp directory — never the Person's
-    /// home, which holds the one file kith cannot rebuild.
+    /// A scratch Circle root under the system temp directory, never the Person's home.
     fn scratch(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -659,8 +548,6 @@ mod tests {
     fn log_of(root: &Path, device: &str) -> PathBuf {
         root.join(".kith/items/main").join(format!("{device}.jsonl"))
     }
-
-    // ── the append protocol ──────────────────────────────────────────
 
     #[test]
     fn append_writes_one_complete_line_per_record_under_the_devices_own_name() {
@@ -745,8 +632,6 @@ mod tests {
         assert!(append(&root, "../escape", ANA_DEVICE, &rec).is_err());
         assert!(append(&root, "main", "..", &rec).is_err());
     }
-
-    // ── reading ──────────────────────────────────────────────────────
 
     #[test]
     fn a_collection_nobody_has_written_to_reads_as_empty() {
@@ -858,8 +743,6 @@ mod tests {
         assert_eq!(read_all(&root, "main").unwrap().len(), 1);
     }
 
-    // ── the reduction ────────────────────────────────────────────────
-
     #[test]
     fn the_newest_binding_wins_for_an_items_bytes() {
         let root = scratch("bind");
@@ -892,9 +775,7 @@ mod tests {
         let ben = PersonId::generate();
         let item = ItemId::generate();
 
-        // Ben is not the adder, and in v0.1 he is not even the Steward. Readers
-        // honour the tombstone anyway: a Role is policy, not enforcement, and
-        // honouring a removal conditionally would cost convergence.
+        // Ben is not the adder; readers honour the tombstone anyway.
         let records = vec![
             add(&item, &ana, "2026-08-07T09:00:00Z", "sunset", "sunset.png", "b3:aa"),
             remove(&item, &ben, "2026-08-07T09:30:00Z"),
@@ -909,8 +790,7 @@ mod tests {
         let root = scratch("tombstone-order");
         let ana = PersonId::generate();
         let item = ItemId::generate();
-        // Same instant, remove first in the file: the reduction must not depend on
-        // which line happened to be read first.
+        // Same instant, remove first in the file.
         let records = vec![
             remove(&item, &ana, "2026-08-07T09:00:00Z"),
             add(&item, &ana, "2026-08-07T09:00:00Z", "sunset", "sunset.png", "b3:aa"),
@@ -972,8 +852,7 @@ mod tests {
         let ana = PersonId::generate();
         let ben = PersonId::generate();
 
-        // Both adopt a pre-existing wp-sync tree; `at` is the file's mtime, so the
-        // two records are identical but for the Item id and the Person.
+        // `at` is the file's mtime, so the two records differ only in Item id and Person.
         let mtime = "2026-01-02T03:04:05Z";
         let ana_record = add(&ItemId::generate(), &ana, mtime, "sunset", "sunset.png", "b3:aa");
         let ben_record = add(&ItemId::generate(), &ben, mtime, "sunset", "sunset.png", "b3:aa");
@@ -1065,8 +944,6 @@ mod tests {
         assert_eq!(read_all(&root, "main").unwrap(), vec![rec]);
     }
 
-    // ── test helpers ─────────────────────────────────────────────────
-
     /// The whole derived view as comparable text, so a convergence assertion says
     /// what actually differs.
     fn fingerprint(items: &[Item]) -> Vec<String> {
@@ -1081,8 +958,7 @@ mod tests {
             .collect()
     }
 
-    /// Heap's algorithm: every ordering of the records, because "any order" is the
-    /// claim being tested.
+    /// Heap's algorithm: every ordering of the records.
     fn permute(records: &mut Vec<Record>, k: usize, visit: &mut impl FnMut(&[Record])) {
         if k + 1 >= records.len() {
             visit(records);

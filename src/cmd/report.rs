@@ -1,28 +1,12 @@
 //! `kith list` and `kith status` — the two commands that only look.
 //!
-//! A report's whole job is to be true, so three rules run through every line of
-//! this module:
+//! Local facts plus what the engine says, and nothing else. Presence is never
+//! "online": `unknown` is a real answer, `not connected` would be a claim this
+//! Device is in no position to make. Every caveat the human surface prints also
+//! travels in the envelope's `notes[]`, so a script is told what a Person is told.
 //!
-//! * **Local facts, plus what the engine says, and nothing else.** Items come
-//!   from this Device's copy of the record logs, Members from the Membership
-//!   claims in the synced tree, presence and completion from the Sync Engine's
-//!   live view. kith never reports what another Member holds, because it cannot
-//!   know it — a peer at 100% means bytes landed on that Device, never that
-//!   anybody looked (ADR-0002 §5, ADR-0004 §10).
-//! * **Presence, never "online".** A connection is a socket, and a socket is all
-//!   kith has. `unknown` is a real answer and is what an unreachable Sync Engine
-//!   produces; `not connected` would be a claim this Device is in no position to
-//!   make (CONTEXT.md, spec §7.5).
-//! * **A script is told exactly what a Person is told.** Every caveat the human
-//!   surface prints in grey — Roles are policy, attribution is asserted, presence
-//!   is stale — travels in the envelope's `notes[]` (spec §3.2). A `--json`
-//!   consumer that got a cleaner story than a human would be the honesty rules
-//!   quietly failing where nobody reads them.
-//!
-//! Both verbs work with the Sync Engine down. `list` degrades to the tree and
-//! says so, and exits 0 because the list is real; `status` prints the same local
-//! facts and exits 69, because "is anything happening" is precisely the question
-//! an unreachable engine answers (spec §§4.7–4.8).
+//! Both verbs work with the Sync Engine down: `list` degrades to the tree and
+//! exits 0, `status` prints the same local facts and exits 69.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
@@ -40,7 +24,7 @@ use crate::provider::{ImportCandidate, Provider};
 use crate::store::descriptors::{self, CircleDescriptor};
 use crate::store::{claims, records};
 
-// ── the dialect the whole binary speaks (spec §3.1) ──────────────────
+// Sysexits, so the whole binary speaks one dialect.
 
 const EX_OK: i32 = 0;
 const EX_FAILED: i32 = 1;
@@ -50,14 +34,10 @@ const EX_UNAVAILABLE: i32 = 69;
 const EX_INTERNAL: i32 = 70;
 const EX_CONFIG: i32 = 78;
 
-/// The envelope's own version (spec §3.2). Independent of the product version,
-/// and bumped only by a breaking change of shape — new optional fields do not
-/// move it.
+/// The envelope's own version, bumped only by a breaking change of shape.
 const ENVELOPE_SCHEMA: u32 = 1;
 
-/// v0.1's sole Collection, created with the Circle (ROADMAP §2). The id is
-/// opaque in the format, so v0.3's additional Collections need no change here
-/// beyond asking the descriptors which ones exist.
+/// v0.1's sole Collection, created with the Circle.
 const COLLECTION: &str = "main";
 
 /// The Provider compiled into this build.
@@ -65,8 +45,7 @@ const WALLPAPER: &str = "wallpaper";
 
 // ── the honesty strings, verbatim (spec §7.2) ────────────────────────
 
-/// Printed under any table that has a Role in it. A surface that shows a Role
-/// without one of these two strings is a bug, not a style choice.
+/// Printed under any table with a Role in it; a Role shown without it is a bug.
 const ROLE_CAVEAT_LONG: &str = "Roles are agreements, not enforcement. kith has no server: any Member's Device \
 can add, change or delete Items in this Circle. What kith does guarantee is admission — only Devices you approve \
 get in — and recovery: every other Device keeps the last 5 versions of every Item for 30 days.";
@@ -74,26 +53,17 @@ get in — and recovery: every other Device keeps the last 5 versions of every I
 /// The one-line contexts: `status`, and anywhere a Role is a single cell.
 const ROLE_CAVEAT_SHORT: &str = "Roles are agreements, not enforcement — admission is the only gate.";
 
-/// ADR-0004 §5 asks for this wherever attribution is shown, in the same voice
-/// the product uses for Roles — and `kith list items` has an ADDED BY column, so
-/// this is one of those places.
-///
-/// *Call recorded here:* spec §3.2's standing note codes do not include one for
-/// attribution, because §7.2 wrote the rule for Roles. The rule ADR-0004 §5 gives
-/// for attribution is the same rule, so it gets the same treatment and a code of
-/// its own rather than silence.
+/// Printed wherever attribution is shown — `kith list items` has an ADDED BY column.
 const ATTRIBUTION_CAVEAT: &str = "Who added an Item is asserted by the Device that wrote the record, never proven \
 — kith signs nothing. Attribution is believable because a human admitted that Device to the Circle, not because \
 kith can verify what it says.";
 
-/// The other half of the same honesty, for the surface that lists People rather
-/// than Items: a Membership claim is a claim, not a proof (CONTEXT.md).
+/// The same honesty for the surface that lists People: a claim is not a proof.
 const CLAIM_CAVEAT: &str = "A Membership claim is one Device saying which Person it speaks for. Nothing signs \
 it — a claim is believable because a human admitted that Device to this Circle, not because kith can verify \
 what it says.";
 
-/// Presence with no engine behind it. Never "not connected", which would be a
-/// claim about a Person made by a Device that cannot see anything.
+/// Presence with no engine behind it — never "not connected".
 const PRESENCE_STALE: &str = "The Sync Engine is not answering, so this Device holds no connection state: every \
 Presence reads unknown rather than not connected.";
 
@@ -101,10 +71,8 @@ Presence reads unknown rather than not connected.";
 
 /// `kith list [items|circles|members]` — the Collection, the Circles, the People.
 ///
-/// Listing never needs the Sync Engine (spec §4.7): with it down, `items` and
-/// `circles` read the tree and exit 0 because the list is real, and `members`
-/// reports every Presence as `unknown` and exits 0 too. Only `status` treats
-/// unreachability as its own result.
+/// Never needs the Sync Engine: with it down the tree is still real, so every
+/// subject exits 0. Only `status` treats unreachability as its own result.
 pub async fn list(subject: Option<&str>, json: bool) -> i32 {
     let subject = match Subject::parse(subject) {
         Ok(s) => s,
@@ -113,22 +81,10 @@ pub async fn list(subject: Option<&str>, json: bool) -> i32 {
 
     let mut report = Report::new(subject.command(), json);
 
-    let loaded = match config::inspect() {
+    let loaded = match configuration(&mut report) {
         Ok(loaded) => loaded,
-        Err(e) => {
-            let f = Failure {
-                code: e.code(),
-                exit: EX_CONFIG,
-                message: e.to_string(),
-                detail: None,
-                fix: e.fix(),
-            };
-            return report.finish::<()>(None, Some(f), String::new);
-        }
+        Err(f) => return report.finish::<()>(None, Some(f), String::new),
     };
-    for warning in loaded.warnings() {
-        report.note(WARN, config::UNKNOWN_KEY_NOTE, warning);
-    }
 
     let me = identity(&mut report);
     let sync = connect(&loaded).await;
@@ -153,27 +109,14 @@ pub async fn list(subject: Option<&str>, json: bool) -> i32 {
 /// `kith status` — every Circle's sync state and per-peer completion.
 ///
 /// Exits 69 when the Sync Engine is unreachable and prints the local facts
-/// anyway, prefixed by the offline line (spec §4.8), so it is usable as a health
-/// probe without becoming useless as a report.
+/// anyway, so it works as a health probe without becoming useless as a report.
 pub async fn status(json: bool) -> i32 {
     let mut report = Report::new("status", json);
 
-    let loaded = match config::inspect() {
+    let loaded = match configuration(&mut report) {
         Ok(loaded) => loaded,
-        Err(e) => {
-            let f = Failure {
-                code: e.code(),
-                exit: EX_CONFIG,
-                message: e.to_string(),
-                detail: None,
-                fix: e.fix(),
-            };
-            return report.finish::<()>(None, Some(f), String::new);
-        }
+        Err(f) => return report.finish::<()>(None, Some(f), String::new),
     };
-    for warning in loaded.warnings() {
-        report.note(WARN, config::UNKNOWN_KEY_NOTE, warning);
-    }
 
     let me = identity(&mut report);
     let sync = connect(&loaded).await;
@@ -198,9 +141,8 @@ pub async fn status(json: bool) -> i32 {
             name: circle_name(circle, &local),
             root: circle.root.display().to_string(),
             state: engine_status.as_ref().map(|s| s.state.clone()),
-            // The seam reports per-peer completion, never this Device's own
-            // percentage, and spec §7.5 forbids inventing one: with no figure the
-            // surface says it is syncing and shows no bar.
+            // The seam reports per-peer completion only; an aggregate here
+            // would be invented.
             percent: None,
             bytes_needed: engine_status.as_ref().map(|s| s.bytes_needed),
             items: local.items.len(),
@@ -263,8 +205,7 @@ pub async fn status(json: bool) -> i32 {
         circles: rows,
     };
 
-    // The one place unreachability is the answer rather than a degradation: the
-    // local facts still print, and the exit code is what a health probe reads.
+    // The one place unreachability is the answer rather than a degradation.
     let failure = sync
         .trouble
         .as_ref()
@@ -376,7 +317,6 @@ async fn list_circles(
             "You are in no Circles yet. Run kith create <name>, or kith join <code> if someone invited you.",
         );
     }
-    // A ROLE column is a Role shown, so it carries the caveat like every other.
     report.note(CAVEAT, "role.advisory", ROLE_CAVEAT_SHORT);
 
     let data = CirclesData { circles: rows };
@@ -429,14 +369,10 @@ async fn list_members(
     report.finish(Some(data), None, || body)
 }
 
-/// Which Circle a Circle-scoped verb acts on (spec §1.3).
+/// Which Circle a Circle-scoped verb acts on: the sole one, or a refusal.
 ///
-/// *Gap noted.* §1.3's first rule is `--circle`, which is a global flag the
-/// dispatcher owns; the module contract for these two verbs carries no Circle
-/// argument, so rules 2 and 3 are what live here. When the flag lands it threads
-/// in ahead of this function and nothing below it changes: the CLI still never
-/// guesses from history, because a command's meaning has to be readable from its
-/// own text.
+/// `--circle` is not in this build's signature, and the CLI never guesses from
+/// history.
 fn active(circles: &[CircleRef]) -> Result<&CircleRef, Failure> {
     match circles {
         [] => Err(Failure {
@@ -459,11 +395,8 @@ fn active(circles: &[CircleRef]) -> Result<&CircleRef, Failure> {
 
 // ── local facts: one Circle's tree, read straight off disk ───────────
 
-/// Everything one Circle says about itself on this Device.
-///
-/// Nothing here asks the Sync Engine anything. That is what makes `kith list`
-/// work with the daemon down, and it is also the authority rule (ADR-0001): the
-/// synced tree is the source of truth and everything else is a view of it.
+/// Everything one Circle says about itself on this Device. Asks the Sync Engine
+/// nothing, which is what makes `kith list` work with the daemon down.
 struct Local {
     descriptor: Option<CircleDescriptor>,
     collection: String,
@@ -471,14 +404,12 @@ struct Local {
     items: Vec<Item>,
     claims: Vec<MembershipClaim>,
     people: Vec<Person>,
-    /// PersonId → display name, from **every** claim including departed
-    /// Members', because a Person's name has to keep resolving on the Items they
-    /// added long after they left (ADR-0004 §5).
+    /// PersonId → display name, from every claim including departed Members':
+    /// a name has to keep resolving on the Items they added after they left.
     names: BTreeMap<String, String>,
     last_change: Option<String>,
-    /// Copies the Sync Engine made, sitting next to their Items. `None` when kith
-    /// could not ask the seam which names are the engine's own, because a count
-    /// nobody could take is not a count of zero.
+    /// Copies the Sync Engine made. `None` when the seam could not be asked which
+    /// names are the engine's own — a count nobody took is not a count of zero.
     conflicts: Option<usize>,
     /// What could not be read. Collected rather than raised: one hand-edited file
     /// must not blank a report.
@@ -497,9 +428,8 @@ impl Local {
             }
         };
 
-        // v0.1 has exactly one Collection, created with the Circle. A Circle
-        // adopted before its descriptor arrived has none yet, which is a state
-        // and not a fault (collections spec §4.3).
+        // A Circle adopted before its descriptor arrived has no Collection
+        // descriptor yet, which is a state and not a fault.
         let collection = COLLECTION.to_string();
         let provider = match descriptors::read_collection(root, &collection) {
             Ok(Some(d)) => d.provider,
@@ -548,10 +478,7 @@ impl Local {
         }
     }
 
-    /// v0.1's whole Role derivation: admin iff this Person founded the Circle,
-    /// member otherwise (ADR-0004 §5). Derived from `circle.toml` plus the
-    /// claims, never from a roles file — a Steward-written roles map would be a
-    /// second writer surface duplicating the claim.
+    /// Admin iff this Person founded the Circle, member otherwise.
     fn role_of(&self, person: &PersonId) -> Role {
         match &self.descriptor {
             Some(d) if d.founder_person == person.as_str() => Role::Admin,
@@ -559,18 +486,14 @@ impl Local {
         }
     }
 
-    /// The Circle's Steward Device, read from the descriptor and never from the
-    /// engine's peer flags (ADR-0002 §3): the introducer flags nobody, so on the
-    /// Steward's own Device no peer carries the flag and a flag-derived answer
-    /// would be missing from exactly the machine that is certain to have one.
+    /// The Steward Device, read from the descriptor and never from the engine's
+    /// peer flags: on the Steward's own Device no peer carries the flag.
     fn steward_device(&self) -> Option<&str> {
         self.descriptor.as_ref().map(|d| d.founder_device.as_str())
     }
 
     /// The Person that Device speaks for, if any claim names them. A Device that
-    /// has never run kith has published none, and then the Circle knows the
-    /// Steward's Device and cannot name the Steward — kith says so rather than
-    /// inventing a placeholder Person (ADR-0002 §7).
+    /// never ran kith has published none, and kith says so rather than invent one.
     fn steward_person(&self) -> Option<String> {
         let device = self.steward_device()?;
         let claim = self.claims.iter().find(|c| c.device == device)?;
@@ -584,11 +507,10 @@ impl Local {
 
 /// Fold the claims into "who is this Person called".
 ///
-/// Deliberately *not* [`claims::derive_people`]: that answers "who is a Member",
-/// which drops a Person whose every claim carries `left_at`. Attribution has to
-/// outlive Membership, so this reads every claim there is. Newest `asserted`
-/// wins, ties go to the smaller Device id, and a claim kith cannot date never
-/// wins a freshness tie-break against one it can (ADR-0004 §5).
+/// Deliberately *not* [`claims::derive_people`], which drops a Person whose every
+/// claim carries `left_at` — attribution has to outlive Membership. Newest
+/// `asserted` wins, ties go to the smaller Device id, and an undatable claim never
+/// wins a freshness tie-break against one kith can date.
 fn display_names(claims: &[MembershipClaim]) -> BTreeMap<String, String> {
     let mut best: BTreeMap<String, (&MembershipClaim, Option<i128>)> = BTreeMap::new();
     for claim in claims {
@@ -612,18 +534,12 @@ fn display_names(claims: &[MembershipClaim]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// How a Person is named where a claim can be found, and how they are named
-/// where none can.
-///
-/// The fallback is the PersonId's short form and never a Device id: a Device is
-/// not a Person, and printing one where the other belongs is the single
-/// confusion the identity model exists to prevent (ADR-0004 §5).
+/// How a Person is named where a claim can be found.
 fn name_of(names: &BTreeMap<String, String>, person: &PersonId) -> Option<String> {
     names.get(person.as_str()).cloned()
 }
 
-/// How an unresolvable attribution reads: the PersonId's short form, prefix
-/// included, and never a blank.
+/// An unresolvable attribution: the PersonId's short form, never a Device id.
 fn unnamed(person_id: &str) -> String {
     let short: String = person_id.chars().take(8).collect();
     format!("unknown Person ({short})")
@@ -631,14 +547,8 @@ fn unnamed(person_id: &str) -> String {
 
 // ── rows ─────────────────────────────────────────────────────────────
 
-/// One Item as `kith list items` renders it.
-///
-/// *Two absences, both deliberate.* There is no unseen dot: "new since you last
-/// looked" is a local notion the Gallery keeps (ADR-0004 §10), and the CLI holds
-/// no record of what this Person has looked at — printing every Item as unseen
-/// would be a lie the column exists to avoid. And there is no *found by* variant
-/// yet: `adopted` is reserved on the record and unwritten in this build, so
-/// every Item reads as added.
+/// One Item as `kith list items` renders it. No unseen dot: the CLI holds no
+/// record of what this Person has looked at.
 fn item_rows(local: &Local, favourites: &BTreeSet<String>, facts: bool) -> Vec<ItemRow> {
     let provider = facts.then(WallpaperProvider::default);
     local
@@ -647,9 +557,8 @@ fn item_rows(local: &Local, favourites: &BTreeSet<String>, facts: bool) -> Vec<I
         .map(|item| {
             let (width, height) = match (&provider, &item.path) {
                 (Some(p), Some(path)) => {
-                    // Bytes that have arrived can be measured; a record carries no
-                    // Provider facts in this build (ADR-0004 §4.2 reserves the
-                    // field), so the answer comes from the content itself.
+                    // A record carries no Provider facts in this build, so the
+                    // answer comes from the content itself.
                     let candidate = ImportCandidate { path, mime: None };
                     match p.extract_metadata(&candidate) {
                         Ok(f) => (f.width, f.height),
@@ -675,14 +584,8 @@ fn item_rows(local: &Local, favourites: &BTreeSet<String>, facts: bool) -> Vec<I
         .collect()
 }
 
-/// The Members of a Circle, plus the Devices in it that no claim names.
-///
-/// Four rows have to render (circles spec §3.7), and all four do: a Member whose
-/// Devices are in the Circle, a Member whose Devices are not, this Person, and
-/// an **unclaimed Device** — one receiving the Circle's bytes that kith cannot
-/// put a name to. That last one is never hidden: a Device holding the Circle's
-/// content is a fact the Circle is entitled to see, and an unnamed one most of
-/// all.
+/// The Members of a Circle, plus the Devices in it that no claim names. An
+/// unclaimed Device is never hidden.
 fn member_rows(
     local: &Local,
     peers: Option<&[PeerDevice]>,
@@ -720,8 +623,6 @@ fn member_rows(
                 person_id: person.id.as_str().to_string(),
                 role: local.role_of(&person.id),
                 presence: presence.as_str(),
-                // One Device per Person in v0.1; the shape is plural underneath,
-                // so v0.3's second Device is one more claim and no new column.
                 device: person.devices.first().map(|d| short_device(d)).unwrap_or_default(),
                 steward: person
                     .devices
@@ -752,11 +653,10 @@ fn member_rows(
 
 /// One Device's live view of one Person's Devices, and nothing more.
 ///
-/// `Connected` if any of their Devices is connected to *this* one — the rollup
-/// rule v0.3's second Device already needs. `Unknown` when the engine said
-/// nothing, and for this Person: kith does not hold a connection to itself and
-/// will not pretend to (circles spec §3.7 row 4). The second value says whether
-/// the engine knows any of their Devices to be in this Circle at all.
+/// `Connected` if any of their Devices is connected to *this* one; `Unknown` when
+/// the engine said nothing, and for this Person — kith holds no connection to
+/// itself. The second value says whether the engine knows any of their Devices to
+/// be in this Circle at all.
 fn presence_of(devices: &[String], peers: Option<&[PeerDevice]>, you: bool) -> (Presence, Option<bool>) {
     if you {
         return (Presence::Unknown, None);
@@ -777,19 +677,16 @@ fn presence_of(devices: &[String], peers: Option<&[PeerDevice]>, you: bool) -> (
     match (seen, connected) {
         (true, true) => (Presence::Connected, Some(true)),
         (true, false) => (Presence::NotConnected, Some(true)),
-        // Claims name Devices the engine does not have in this Circle: they left,
-        // or were never admitted. Either way this Device has no connection state
-        // about them, and unknown is the honest value.
+        // A claim naming a Device the engine does not have in this Circle leaves
+        // no connection state to report, and unknown is the honest value.
         (false, _) => (Presence::Unknown, Some(false)),
     }
 }
 
 // ── the Sync Engine, when it is there ────────────────────────────────
 
-/// What this Device can currently say about the Sync Engine.
-///
-/// `engine` is `Some` only while the engine is answering, so nothing downstream
-/// can accidentally ask a daemon that is not there.
+/// What this Device can currently say about the Sync Engine. `engine` is `Some`
+/// only while it is answering, so nothing downstream asks a daemon that is gone.
 struct Sync {
     engine: Option<SyncthingEngine>,
     address: Option<String>,
@@ -797,11 +694,9 @@ struct Sync {
     version: Option<String>,
     trouble: Option<SyncError>,
     local_device: Option<String>,
-    /// The globs the engine declares as its own (ADR-0002 §1), kept even when the
-    /// daemon stops answering: they are a constant of the implementation, not a
-    /// fact about the daemon. `None` means kith never got as far as an engine to
-    /// ask, and then it counts nothing rather than guessing at names it must not
-    /// know.
+    /// The globs the engine declares as its own, kept even when the daemon stops
+    /// answering. `None` means kith never got as far as asking, and then it counts
+    /// nothing rather than guess at names it must not know.
     reserved: Option<Vec<&'static str>>,
 }
 
@@ -810,13 +705,8 @@ impl Sync {
         self.reserved.as_deref()
     }
 
-    /// The Circles this Device replicates.
-    ///
-    /// With the engine answering, its answer is the truth and is remembered. With
-    /// it down, the last remembered answer is used so that `kith list` still
-    /// works — the same authority rule the cache lives under (ADR-0004 §9): the
-    /// engine wins whenever both speak, and losing the remembered copy costs
-    /// nothing but a reachable daemon.
+    /// The Circles this Device replicates. The engine's answer is the truth and
+    /// is remembered; with it down the remembered copy keeps `kith list` working.
     async fn circles(&self) -> Vec<CircleRef> {
         if let Some(engine) = &self.engine
             && let Ok(circles) = engine.circles().await
@@ -831,11 +721,8 @@ impl Sync {
         self.engine.as_ref()?.status(circle).await.ok()
     }
 
-    /// One Circle, as the engine sees it right now: its peer Devices and its sync
-    /// state, in one pass so a report costs the daemon one round of questions.
-    ///
-    /// `None` peers means the engine said nothing at all, and that is what turns
-    /// every Presence to `unknown` rather than to `not connected`.
+    /// One Circle as the engine sees it: peers and sync state in one pass. `None`
+    /// peers means it said nothing, which is what turns every Presence unknown.
     async fn look(&self, circle: &CircleId) -> (Option<Vec<PeerDevice>>, Option<CircleStatus>) {
         let Some(engine) = &self.engine else {
             return (None, None);
@@ -844,20 +731,15 @@ impl Sync {
     }
 }
 
-/// Per-peer completion, keyed by Device. Bytes landing is all a percentage means:
-/// nothing here says anybody looked, and nothing ever will.
+/// Per-peer completion, keyed by Device. Bytes landing is all a percentage means.
 fn completion_of(status: Option<&CircleStatus>) -> BTreeMap<String, f64> {
     status
         .map(|s| s.peers.iter().map(|p| (p.device.0.clone(), p.percent)).collect())
         .unwrap_or_default()
 }
 
-/// Discover the daemon and ask it whether it is there.
-///
-/// Credentials come from the config override first and from the daemon's own
-/// configuration second (ADR-0002 §6). kith reads them and never writes them: a
-/// rejected key is reported with the place it was read from, never rotated,
-/// regenerated or guessed.
+/// Discover the daemon and ask it whether it is there. Credentials are read,
+/// never written: a rejected key is reported, never rotated or regenerated.
 async fn connect(loaded: &config::Loaded) -> Sync {
     let Some(creds) = credentials(loaded) else {
         return Sync {
@@ -874,9 +756,8 @@ async fn connect(loaded: &config::Loaded) -> Sync {
     let address = Some(creds.base_url.clone());
     let source = Some(creds.source.clone());
     let engine = SyncthingEngine::new(creds);
-    // Asked once, up front: the answer is a constant of the implementation, so a
-    // daemon that stops answering does not stop kith from knowing which paths
-    // are the engine's own.
+    // Asked once, up front, so a daemon that stops answering does not stop kith
+    // from knowing which paths are the engine's own.
     let reserved = Some(engine.reserved_paths().to_vec());
 
     match engine.health().await {
@@ -925,19 +806,13 @@ fn credentials(loaded: &config::Loaded) -> Option<Credentials> {
     }
 }
 
-/// The engine's own trouble, as a failure a Person can act on (spec §§3.1, 7.1).
-///
-/// *Call recorded here:* the fix line points at `kith doctor` rather than naming
-/// the daemon's own binary. Naming it is licensed by spec §7.8 inside a fix line,
-/// but the concept above this seam is the Sync Engine and `doctor` is the surface
-/// whose job is to name the program plainly — so the honesty is kept and the
-/// engine's name still lives in exactly one module (ADR-0002 §1).
+/// The engine's own trouble, as a failure a Person can act on. Every fix line
+/// points at `kith doctor`: the daemon's own name lives in exactly one module.
 fn engine_failure(trouble: &SyncError, address: Option<&str>, credentials: Option<&Path>) -> Failure {
     let at = address.unwrap_or("the Sync Engine's address");
     match trouble {
-        // No address at all means kith never found credentials to try, which is a
-        // different sentence from a daemon that is not answering — and a Person
-        // who is told the wrong one goes looking in the wrong place.
+        // No address means kith found no credentials to try, which is a different
+        // sentence from a daemon that is not answering.
         SyncError::Unreachable if address.is_none() => Failure {
             code: "engine.unreachable",
             exit: EX_UNAVAILABLE,
@@ -983,8 +858,7 @@ fn engine_failure(trouble: &SyncError, address: Option<&str>, credentials: Optio
     }
 }
 
-/// The `!` line a command that keeps working prints when the daemon is down
-/// (spec §7.1). Never a modal, never a silent retry.
+/// The `!` line a command that keeps working prints when the daemon is down.
 fn offline_line(trouble: &SyncError, address: Option<&str>) -> String {
     match (trouble, address) {
         (SyncError::Unauthorized, Some(at)) => {
@@ -1000,12 +874,9 @@ fn offline_line(trouble: &SyncError, address: Option<&str>) -> String {
 
 // ── the Circles this Device knows about when the engine is down ──────
 //
-// ADR-0004 §9's cache is the layer that answers this properly, and v0.1's cache
-// is not built yet. This is the one fact `kith list` cannot do without: the
-// engine owns where a Circle's bytes live (`CircleRef.root`), so with the daemon
-// down there would otherwise be nothing to read a tree *from*. It is written only
-// from an answer the engine just gave, it lives in the cache directory because it
-// is derivable and disposable, and the engine wins whenever both speak.
+// The engine owns where a Circle's bytes live, so with the daemon down there is
+// otherwise nothing to read a tree *from*. Written only from an answer the engine
+// just gave, disposable, and the engine wins whenever both speak.
 
 #[derive(Serialize, Deserialize, Default)]
 struct KnownCircles {
@@ -1040,9 +911,7 @@ fn remember_circles(circles: &[CircleRef]) {
             })
             .collect(),
     };
-    // Best effort throughout: a cache kith cannot write costs a Person nothing
-    // but a reachable daemon next time, and a report that failed because a cache
-    // was read-only would be absurd.
+    // Best effort throughout: a report must not fail because a cache is read-only.
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -1074,13 +943,10 @@ fn recall_circles() -> Vec<CircleRef> {
 
 // ── Favourites: read, never written, never sent anywhere ─────────────
 
-/// This Person's private marks (ADR-0004 §7), so `kith list items` can show the
-/// `★` column.
+/// This Person's private marks, so `kith list items` can show the `★` column.
 ///
-/// Read-only and local by construction: Favourites live outside every synced
-/// tree, so marking an Item announces nothing to anybody. This little reader is a
-/// stand-in until the Favourites module lands, and it is why nothing here writes
-/// to the file — the toggle belongs to the Action, not to a report.
+/// Read-only by construction: the toggle belongs to the Action, not to a report,
+/// and Favourites live outside every synced tree.
 fn favourites_of(circle: &str) -> BTreeSet<String> {
     let Some(path) = directories::BaseDirs::new().map(|b| b.data_dir().join("kith/favourites.jsonl")) else {
         return BTreeSet::new();
@@ -1122,14 +988,8 @@ fn fold_favourites(text: &str, circle: &str) -> BTreeSet<String> {
 
 /// Count the copies the Sync Engine made inside a Circle.
 ///
-/// The engine's own artefact names never climb above the seam (ADR-0002 §1), so
-/// this asks the seam for its globs and matches those. The globs that are plain
-/// directory names are what the walk *skips*; the ones that are filename
-/// patterns are what it counts, because a pattern beside an Item is a copy of
-/// something rather than a fixed piece of the engine's bookkeeping.
-///
-/// It is a count, never a resolution: conflicting copies are named rather than
-/// hidden, and resolving them is the v0.2 Health screen's job (spec, edge cases).
+/// The globs come from the seam. Plain directory names are what the walk *skips*;
+/// filename patterns are what it counts. A count, never a resolution.
 fn count_engine_copies(root: &Path, reserved: &[&str]) -> usize {
     let skip_dirs: Vec<&str> = reserved
         .iter()
@@ -1157,9 +1017,8 @@ fn count_engine_copies(root: &Path, reserved: &[&str]) -> usize {
             let Some(name) = name.to_str() else { continue };
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
-                // `.kith/` is kith's own, and the engine's own directories are
-                // its bookkeeping and its recovery archive — neither is a copy
-                // sitting next to an Item.
+                // Neither kith's own tree nor the engine's is a copy sitting
+                // next to an Item.
                 if name == ".kith" || skip_dirs.contains(&name) {
                     continue;
                 }
@@ -1175,8 +1034,7 @@ fn count_engine_copies(root: &Path, reserved: &[&str]) -> usize {
     found
 }
 
-/// `*` matches any run of characters; everything else is literal. Enough for the
-/// filename globs the seam hands out, and small enough to read.
+/// `*` matches any run of characters; everything else is literal.
 fn glob_match(pattern: &str, name: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
@@ -1218,11 +1076,7 @@ const CAVEAT: &str = "caveat";
 const CONNECTED: &str = "connected";
 const NOT_CONNECTED: &str = "not_connected";
 
-/// One invocation, one object, success or failure — and never anything else on
-/// stdout while `--json` is on.
-///
-/// Not to be confused with the change feed's `Envelope`: this one is the CLI's
-/// output contract.
+/// One invocation, one object — and nothing else on stdout while `--json` is on.
 #[derive(Serialize)]
 struct Envelope<T> {
     schema: u32,
@@ -1234,8 +1088,7 @@ struct Envelope<T> {
     notes: Vec<Note>,
 }
 
-/// The honesty channel. `level` is `info`, `warn` or `caveat`, and a caveat is a
-/// standing truth about how kith works rather than a problem.
+/// The honesty channel: a caveat is a standing truth, not a problem.
 #[derive(Serialize, Clone)]
 struct Note {
     level: &'static str,
@@ -1250,16 +1103,12 @@ struct Failure {
     exit: i32,
     message: String,
     detail: Option<String>,
-    /// An imperative a Person can literally run, or nothing at all. Never padded
-    /// with advice (spec §7.7).
+    /// An imperative a Person can literally run, or nothing at all.
     fix: Option<String>,
 }
 
 /// Accumulates the notes a run produced and then prints exactly one report.
-///
-/// The split matters: nothing above may print, and this is the only thing that
-/// does — which is what keeps stdout carrying data and stderr carrying narration
-/// on every path, including the failing ones.
+/// Nothing above this may print, on any path.
 struct Report {
     command: &'static str,
     json: bool,
@@ -1275,12 +1124,9 @@ impl Report {
         self.notes.push(Note { level, code, message: message.into() });
     }
 
-    /// Print the report and hand back the process's exit code.
-    ///
-    /// `data` is present even when a failure is attached: `kith status` with the
-    /// engine down is a real answer plus a real failure, and a script that got
-    /// `null` there would have to run the command twice to learn what a Person
-    /// sees once.
+    /// Print the report and hand back the process's exit code. `data` is present
+    /// even when a failure is attached — `kith status` with the engine down is a
+    /// real answer plus a real failure.
     fn finish<T: Serialize>(
         self,
         data: Option<T>,
@@ -1304,9 +1150,8 @@ impl Report {
                     println!("{line}");
                     exit
                 }
-                // A report that cannot be serialised is a bug in kith, and 70 is
-                // what a bug exits with. The envelope stays well-formed so the
-                // script parsing it still gets one object.
+                // The envelope stays well-formed so the script parsing it still
+                // gets one object.
                 Err(e) => {
                     println!(
                         r#"{{"schema":{ENVELOPE_SCHEMA},"command":"{}","ok":false,"exit":{EX_INTERNAL},"data":null,"error":{{"code":"internal.unserialisable","message":{},"detail":null,"fix":null}},"notes":[]}}"#,
@@ -1318,9 +1163,8 @@ impl Report {
             };
         }
 
-        // Human: the failure first, because it frames everything under it; then
-        // what degraded; then the data on stdout; then the standing caveats,
-        // under the output where spec §7 puts them.
+        // Failure first, then what degraded, then the data on stdout, then the
+        // standing caveats under it.
         if let Some(error) = &error {
             eprintln!("✗ {}", error.message);
             if let Some(fix) = &error.fix {
@@ -1363,22 +1207,20 @@ struct ItemsData {
 
 #[derive(Serialize)]
 struct ItemRow {
-    /// The full Item id: `kith list items --json` emits stable handles, and the
-    /// Item ref grammar (spec §1.4) addresses them by prefix.
+    /// The full Item id — a stable handle, addressed by prefix elsewhere.
     id: String,
     title: String,
-    /// The Person's name, or `null` when no Membership claim names them yet —
-    /// `added_by_person` always carries the PersonId, so a script is never left
-    /// with a blank and never handed a Device id in a Person's place.
+    /// The Person's name, or `null` when no claim names them yet;
+    /// `added_by_person` always carries the PersonId.
     added_by: Option<String>,
     added_by_person: String,
     added: String,
     bytes: Option<u64>,
-    /// Whether this Device holds the bytes. Metadata outruns content by design
-    /// (ADR-0004 §4.4), so `false` is an ordinary arrival state and not a fault.
+    /// Whether this Device holds the bytes. Metadata outruns content by design,
+    /// so `false` is an ordinary arrival state and not a fault.
     present: bool,
     path: Option<String>,
-    /// Private to this Person, and never sent anywhere (ADR-0004 §7).
+    /// Private to this Person, and never sent anywhere.
     favourite: bool,
     width: Option<u32>,
     height: Option<u32>,
@@ -1396,8 +1238,7 @@ struct CircleRow {
     role: Option<Role>,
     members: usize,
     items: usize,
-    /// `null` when the Sync Engine is not answering: kith does not guess a state
-    /// it cannot see.
+    /// `null` when the Sync Engine is not answering.
     state: Option<String>,
     root: String,
 }
@@ -1415,24 +1256,19 @@ struct MemberRow {
     person: Option<String>,
     person_id: String,
     role: Role,
-    /// Always `connected`, `not_connected` or `unknown` — never a boolean, never
-    /// a last-seen time, and never the word "online".
+    /// Always `connected`, `not_connected` or `unknown` — never "online".
     presence: &'static str,
     device: String,
-    /// True on exactly one row, read from the Circle descriptor and never from
-    /// the seam's peer flags.
+    /// Read from the Circle descriptor, never from the seam's peer flags.
     steward: bool,
-    /// This Device's own Person. Their Presence is `unknown` because kith holds
-    /// no connection to itself and will not invent one.
+    /// This Device's own Person, whose Presence is always `unknown`.
     you: bool,
     /// Whether the engine knows a Device of theirs to be in this Circle. `null`
     /// when the engine said nothing.
     in_circle: Option<bool>,
-    /// How much of what this Device knows about their Device holds. Bytes landing
-    /// is all it means: nothing here says anybody looked.
+    /// Bytes landing is all it means: nothing here says anybody looked.
     percent: Option<f64>,
-    /// When a Device of theirs last wrote its Membership claim. Not a join date —
-    /// kith records none.
+    /// When a Device of theirs last wrote its claim. Not a join date.
     asserted: Option<String>,
 }
 
@@ -1457,8 +1293,7 @@ struct EngineInfo {
     reachable: bool,
     version: Option<String>,
     address: Option<String>,
-    /// Where the credentials were read from — named so a rejected key can be
-    /// fixed where it lives, never rotated by kith.
+    /// Where the credentials were read from, so a rejected key can be fixed there.
     credentials: Option<String>,
 }
 
@@ -1476,13 +1311,11 @@ struct CircleStatusRow {
     name: String,
     root: String,
     state: Option<String>,
-    /// v0.1 emits no aggregate percentage: the seam reports per-peer completion
-    /// only, and spec §7.5 forbids fabricating a bar.
+    /// Always `null`: the seam reports per-peer completion only.
     percent: Option<f64>,
     bytes_needed: Option<u64>,
     items: usize,
-    /// `null` when kith could not ask the seam which names the engine owns — a
-    /// count nobody took is not a count of zero.
+    /// `null` when the seam could not be asked — a count nobody took is not zero.
     conflicts: Option<usize>,
     members: usize,
     connected: usize,
@@ -1503,10 +1336,8 @@ struct PeerRow {
 
 // ── human rendering ──────────────────────────────────────────────────
 //
-// stdout carries data; stderr carries narration (spec §1.5). Piped output drops
-// the header and the padding and separates cells with one tab, so `cut -f2`
-// works, and it truncates nothing. Colour is absent altogether: the symbols carry
-// the meaning and colour would only ever have reinforced it.
+// Piped output drops the header and the padding, separates cells with one tab so
+// `cut -f2` works, and truncates nothing.
 
 fn render_items(data: &ItemsData, tty: bool) -> String {
     if data.items.is_empty() {
@@ -1535,8 +1366,8 @@ fn render_items(data: &ItemsData, tty: bool) -> String {
                 item.bytes.map(bytes_human).unwrap_or_else(|| "—".into()),
                 match (item.width, item.height) {
                     (Some(w), Some(h)) => format!("{w}×{h}"),
-                    // A fact kith cannot verify prints as an em dash rather than
-                    // as a plausible number (spec §7.5).
+                    // A fact kith cannot verify prints as an em dash, never as a
+                    // plausible number.
                     _ => "—".into(),
                 },
             ]
@@ -1586,28 +1417,24 @@ fn render_members(data: &MembersData, tty: bool) -> String {
             let person = match &m.person {
                 Some(name) if m.you => format!("{name} (you)"),
                 Some(name) => name.clone(),
-                // The same fallback the Items table uses, for the same reason:
-                // a PersonId's short form, never a Device id standing in.
                 None => unnamed(&m.person_id),
             };
             vec![
                 person,
                 role_word(m.role).to_string(),
-                presence_word(m).to_string(),
+                presence_word(m.presence, m.in_circle, m.you).to_string(),
                 m.device.clone(),
                 if m.steward { "steward".to_string() } else { String::new() },
             ]
         })
         .collect();
 
-    // An unclaimed Device gets a row of its own: a Device receiving this Circle's
-    // content is a fact the Circle is entitled to see, and an unnamed one most of
-    // all. It is never dressed up as a Person.
+    // An unclaimed Device gets a row of its own, never dressed up as a Person.
     for device in &data.unclaimed_devices {
         rows.push(vec![
             format!("· {} — no Membership claim yet", device.name),
             String::new(),
-            presence_text(device.presence).to_string(),
+            presence_word(device.presence, None, false).to_string(),
             device.device.clone(),
             String::new(),
         ]);
@@ -1622,8 +1449,7 @@ fn render_members(data: &MembersData, tty: bool) -> String {
     }
 
     // The PERSON column is wide enough for the whole of an unclaimed Device's
-    // label, because a caveat that gets truncated into an ellipsis is a caveat
-    // nobody reads.
+    // label: a truncated caveat is a caveat nobody reads.
     table(
         &["PERSON", "ROLE", "PRESENCE", "DEVICE", "STEWARD"],
         &rows,
@@ -1695,7 +1521,7 @@ fn render_status(data: &StatusData, _tty: bool) -> String {
                 let who = p.person.clone().unwrap_or_else(|| p.device.clone());
                 match p.percent {
                     Some(percent) => format!("{who} {percent:.0}%"),
-                    None => format!("{who} {}", presence_text(p.presence)),
+                    None => format!("{who} {}", presence_word(p.presence, None, false)),
                 }
             })
             .collect();
@@ -1707,8 +1533,6 @@ fn render_status(data: &StatusData, _tty: bool) -> String {
         let steward = match (&circle.steward_device, &circle.steward_person, circle.steward_is_you) {
             (Some(_), _, true) => "you — every join is approved on this Device".to_string(),
             (Some(device), Some(person), false) => format!("{person} ({device})"),
-            // A Device that has never run kith has published no claim, so the
-            // Circle knows the Steward's Device and cannot name the Steward.
             (Some(device), None, false) => {
                 format!("{device} — no Membership claim yet, so kith cannot name the Person")
             }
@@ -1742,24 +1566,14 @@ fn role_word(role: Role) -> &'static str {
 }
 
 /// The one place a Presence is turned into words, so no surface can invent a
-/// fourth one — and least of all "online".
-fn presence_text(presence: &str) -> &str {
-    match presence {
-        CONNECTED => "connected",
-        NOT_CONNECTED => "not connected",
-        _ => "unknown",
-    }
-}
-
-fn presence_word(member: &MemberRow) -> &'static str {
-    if member.you {
-        // kith does not hold a connection to itself and will not pretend to.
-        return "this Device";
-    }
-    match (member.presence, member.in_circle) {
-        (CONNECTED, _) => "connected",
-        (NOT_CONNECTED, _) => "not connected",
-        (_, Some(false)) => "not in this Circle",
+/// fourth one — least of all "online". `you` is this Device, which holds no
+/// connection to itself and will not pretend to.
+fn presence_word(presence: &str, in_circle: Option<bool>, you: bool) -> &'static str {
+    match (you, presence, in_circle) {
+        (true, _, _) => "this Device",
+        (_, CONNECTED, _) => "connected",
+        (_, NOT_CONNECTED, _) => "not connected",
+        (_, _, Some(false)) => "not in this Circle",
         _ => "unknown",
     }
 }
@@ -1768,8 +1582,6 @@ fn presence_word(member: &MemberRow) -> &'static str {
 
 fn table(header: &[&str], rows: &[Vec<String>], caps: &[usize], tty: bool) -> String {
     if !tty {
-        // Machine framing: no header, no padding, one tab between cells, and
-        // nothing truncated.
         let mut out = String::new();
         for row in rows {
             out.push_str(&row.join("\t"));
@@ -1831,8 +1643,7 @@ fn clip(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
-/// Wrap a caveat so it reads as a paragraph rather than one long line. The
-/// strings are fixed copy; only the line breaks are ours.
+/// Wrap a caveat so it reads as a paragraph rather than one long line.
 fn wrap(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut column = 0;
@@ -1851,9 +1662,8 @@ fn wrap(text: &str, width: usize) -> String {
     out
 }
 
-/// SI units, because the labels say SI. `kith add` and `kith list` must never
-/// print two different sizes for one Item, and dividing by 1024 under a `kB`
-/// label is how that happens.
+/// SI units, because the labels say SI — `kith add` and `kith list` must never
+/// print two different sizes for one Item.
 fn bytes_human(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
     if bytes < 1000 {
@@ -1880,8 +1690,7 @@ fn short_device(device: &str) -> String {
     device.chars().take(7).collect()
 }
 
-/// `~/kith/walls` rather than `/home/ana/kith/walls`, when the path is under this
-/// Person's home.
+/// `~/kith/walls` rather than `/home/ana/kith/walls`.
 fn tilde(path: &Path) -> String {
     let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
     match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
@@ -1890,16 +1699,12 @@ fn tilde(path: &Path) -> String {
     }
 }
 
-/// A timestamp as a comparable instant, or `None` when it will not parse. A
-/// record's `at` is the writer's wall clock and a hand-edited one is a shape kith
-/// has to expect rather than trust.
+/// A timestamp as a comparable instant, or `None` when it will not parse.
 fn instant(at: &str) -> Option<i128> {
     at.parse::<jiff::Timestamp>().ok().map(|t| t.as_nanosecond())
 }
 
-/// RFC 3339 UTC on the way out, whatever spelling the record carried, so a script
-/// gets one format. A timestamp kith cannot parse is passed through untouched
-/// rather than replaced by a guess.
+/// RFC 3339 UTC on the way out; a timestamp kith cannot parse is passed through.
 fn normalise_time(at: &str) -> String {
     match at.parse::<jiff::Timestamp>() {
         Ok(t) => t.to_string(),
@@ -1907,9 +1712,8 @@ fn normalise_time(at: &str) -> String {
     }
 }
 
-/// Human time, in this Device's own zone. Coarse on purpose: the record carries
-/// the writer's wall clock, which is a total order and not a happens-before, so
-/// precision beyond this would be precision kith has not got.
+/// Human time in this Device's zone, coarse on purpose: the record carries the
+/// writer's wall clock, which is not a happens-before.
 fn relative(at: &str) -> String {
     let Ok(then) = at.parse::<jiff::Timestamp>() else {
         return at.to_string();
@@ -1952,8 +1756,7 @@ fn month_name(month: i8) -> &'static str {
         .unwrap_or("???")
 }
 
-/// The Circle's name, preferring the descriptor every Member holds over the label
-/// the transport happens to carry.
+/// Prefers the descriptor every Member holds over the transport's own label.
 fn circle_name(circle: &CircleRef, local: &Local) -> String {
     match &local.descriptor {
         Some(d) if !d.name.is_empty() => d.name.clone(),
@@ -1962,9 +1765,27 @@ fn circle_name(circle: &CircleRef, local: &Local) -> String {
     }
 }
 
-/// This Person, if they have minted one. `kith list` does not require an Identity
-/// — the tree is readable either way — so a missing one is said out loud and the
-/// report continues.
+/// The config, plus its unknown-key warnings as notes, or the failure to print.
+fn configuration(report: &mut Report) -> Result<config::Loaded, Failure> {
+    match config::inspect() {
+        Ok(loaded) => {
+            for warning in loaded.warnings() {
+                report.note(WARN, config::UNKNOWN_KEY_NOTE, warning);
+            }
+            Ok(loaded)
+        }
+        Err(e) => Err(Failure {
+            code: e.code(),
+            exit: EX_CONFIG,
+            message: e.to_string(),
+            detail: None,
+            fix: e.fix(),
+        }),
+    }
+}
+
+/// This Person, if they have minted one. A missing Identity is said out loud and
+/// the report continues.
 fn identity(report: &mut Report) -> Option<Identity> {
     match crate::identity::load() {
         Ok(Some(id)) => Some(id),
@@ -1991,9 +1812,7 @@ mod tests {
     const ANA_DEVICE: &str = "P56IOI7-MZJNU2Y-IQGDREY-DM2MGTI-MGL3BXN-PQ6W5BM-TBBZ4TJ-XZWICQ2";
     const BEN_DEVICE: &str = "K5J2FVL-B3QTXAO-7SWNDUE-HMR4YZI-6CPGA2N-XQTLB5V-JW3EOHY-RD6MSAK";
 
-    /// What an engine might declare as its own. The names are invented on
-    /// purpose: this module cannot recognise a real one, which is the whole
-    /// point of asking the seam instead of knowing.
+    /// Invented on purpose: this module cannot recognise a real one.
     const RESERVED_FIXTURE: &[&str] = &["bookkeeping", "archive/**", "*.engine-copy-*", "~engine~*.tmp"];
 
     fn claim(device: &str, person: &PersonId, name: &str, asserted: &str, left: Option<&str>) -> MembershipClaim {
@@ -2102,9 +1921,6 @@ mod tests {
 
     // ── attribution ──────────────────────────────────────────────────
 
-    /// A departed Member is not a Member, and their name still has to resolve on
-    /// the Items they added — which is why attribution does not read
-    /// `derive_people`.
     #[test]
     fn attribution_outlives_membership() {
         let ana = PersonId::generate();
@@ -2216,14 +2032,12 @@ mod tests {
 
     #[test]
     fn no_surface_word_for_presence_is_ever_online() {
-        // The wire spellings are the domain's, not this module's: a report that
-        // invented its own would be a fourth Presence value nobody agreed to.
         assert_eq!(Presence::Connected.as_str(), CONNECTED);
         assert_eq!(Presence::NotConnected.as_str(), NOT_CONNECTED);
         assert_eq!(Presence::Unknown.as_str(), "unknown");
 
         for presence in [CONNECTED, NOT_CONNECTED, "unknown"] {
-            assert!(!presence_text(presence).contains("online"));
+            assert!(!presence_word(presence, None, false).contains("online"));
         }
         let ana = PersonId::generate();
         let row = MemberRow {
@@ -2238,7 +2052,7 @@ mod tests {
             percent: None,
             asserted: None,
         };
-        assert_eq!(presence_word(&row), "this Device");
+        assert_eq!(presence_word(row.presence, row.in_circle, row.you), "this Device");
     }
 
     // ── the Members table ────────────────────────────────────────────
@@ -2276,8 +2090,6 @@ mod tests {
         assert!(!them.steward);
     }
 
-    /// Never hidden: a Device receiving the Circle's content is a fact the Circle
-    /// is entitled to see, and an unnamed one most of all.
     #[test]
     fn a_device_no_claim_names_still_gets_a_row() {
         let ana = PersonId::generate();
@@ -2399,8 +2211,6 @@ mod tests {
         assert_eq!(value["notes"][0]["code"], "role.advisory");
     }
 
-    /// A script must not get a cleaner story than a human: the caveats are in the
-    /// envelope, spelled the way §7.2 fixes them.
     #[test]
     fn the_honesty_strings_are_the_ones_the_spec_fixed() {
         assert!(ROLE_CAVEAT_LONG.starts_with("Roles are agreements, not enforcement."));
@@ -2420,8 +2230,7 @@ mod tests {
             for banned in ["online", "user", "account", "folder", "friend", "permission"] {
                 assert!(!lower.contains(banned), "{banned} in {text}");
             }
-            // "Server" is legal in exactly one shape — saying there is none —
-            // which is the sentence the whole caveat turns on.
+            // "Server" is legal in exactly one shape: saying there is none.
             assert_eq!(
                 lower.matches("server").count(),
                 lower.matches("no server").count(),
@@ -2582,8 +2391,8 @@ mod tests {
         assert!(rendered.contains("syncing · 123 MB to receive"), "{rendered}");
         assert!(rendered.contains("2 Members, 1 connected — Ben 91%"), "{rendered}");
         assert!(rendered.contains("you — every join is approved on this Device"), "{rendered}");
-        // The transport's product name is spelled inside one module and nowhere
-        // else, so this guard assembles the needle rather than writing it down.
+        // Assembled rather than written down: the transport's name is spelled
+        // inside one module.
         let transport = format!("{}{}", "sync", "thing");
         assert!(
             !rendered.to_lowercase().contains(&transport),
@@ -2595,8 +2404,6 @@ mod tests {
 
     #[test]
     fn bytes_read_the_way_the_spec_writes_them() {
-        // SI, because the labels are SI. The sizes `kith add` and `kith list`
-        // print for one Item have to be the same number.
         assert_eq!(bytes_human(1_993_421), "2.0 MB");
         assert_eq!(bytes_human(123_456_789), "123 MB");
         assert_eq!(bytes_human(512), "512 B");
@@ -2658,8 +2465,6 @@ mod tests {
         assert_eq!(short_device("AB"), "AB");
     }
 
-    /// The one fact `kith list` cannot read off a tree it has not been told
-    /// about. Remembered from the engine's own answer, and disposable.
     #[test]
     fn circles_survive_a_round_trip_through_the_remembered_copy() {
         let known = KnownCircles {
@@ -2707,11 +2512,8 @@ mod tests {
         claims::publish(&root, ANA_DEVICE, &ana, "2026-08-07T09:02:11Z").unwrap();
 
         std::fs::write(root.join("sunset.png"), b"not really a png").unwrap();
-        // A copy the engine left behind, and one that is nobody's business but
-        // the Health screen's.
+        // A copy the engine left behind, and the engine's own archive.
         std::fs::write(root.join("sunset.engine-copy-20260807-091402.png"), b"copy").unwrap();
-        // …and the engine's own archive, which is the recovery net rather than a
-        // copy sitting next to an Item.
         std::fs::create_dir_all(root.join("archive")).unwrap();
         std::fs::write(root.join("archive/sunset.engine-copy-20260101.png"), b"archived").unwrap();
 
@@ -2742,7 +2544,6 @@ mod tests {
         assert_eq!(l.last_change.as_deref(), Some("2026-08-07T09:14:02Z"));
         assert_eq!(l.conflicts, Some(1), "copies are counted, never hidden");
 
-        // The `.kith/` tree is kith's own and is never mistaken for content.
         let rows = item_rows(&l, &BTreeSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].present, "the bytes are here");
