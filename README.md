@@ -23,11 +23,11 @@ well-behaved clients honour, and the docs say so wherever it matters.
 
 ## Status
 
-**v0.1 runs.** Every step of the [ROADMAP](ROADMAP.md#3-the-v01-walkthrough)'s
-twelve-step acceptance walkthrough has been executed across two Devices: Ana creates a
+**v0.1 runs.** The full walkthrough has been executed across two Devices: Ana creates a
 Circle and adds a wallpaper, Ben joins with a printed Invite code, Ana approves him
 after matching the fingerprint both Devices print, and the wallpaper arrives in Ben's
-Gallery attributed to Ana — then Ben adds one and it lands in hers.
+Gallery attributed to Ana — then Ben adds one and it lands in hers. Verified again on a
+network with local discovery, global discovery, relays and NAT traversal all disabled.
 
 ```
 kith doctor          # is this Device set up?
@@ -38,19 +38,15 @@ kith invite          # a code to send over a channel you already trust
 kith                 # the TUI: Gallery, Preview, Members
 ```
 
-Build it with `cargo build --release`; you need a Syncthing daemon already running.
-`kith doctor` names anything missing.
+Already syncing a wallpaper folder? `kith create <name> --path <dir> --adopt` takes it
+over in place — no copying, no second directory.
 
-Not yet done: a second Device per Person, Activity, Notifications, the Health screen,
-rotation, and Search — see the [ROADMAP](ROADMAP.md#4-after-v01) for which milestone
-each lands in.
+Apply backends: caelestia, swww, hyprpaper, feh, or your own command in
+`~/.config/kith/config.toml`. Build with `cargo build --release`; you need a Syncthing
+daemon already running, and `kith doctor` names anything missing.
 
-| Document | What it locks |
-|---|---|
-| [CONTEXT.md](CONTEXT.md) | The vocabulary — Person, Circle, Collection, Item, and the words we refuse to use |
-| [ROADMAP.md](ROADMAP.md) | The v0.1 wedge, its 12-step acceptance walkthrough, and what returns in v0.2+ |
-| [docs/adr/](docs/adr/) | Technical decisions — Rust + ratatui, the Sync Engine seam, the Provider seam |
-| [docs/spec/](docs/spec/) | Behavioural specs, module by module |
+Not yet done: a second Device per Person, Activity, Notifications, a Health screen,
+rotation, Search.
 
 ## Previously: wp-sync
 
