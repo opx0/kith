@@ -1686,8 +1686,11 @@ fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
     if n == 1 { one } else { many }
 }
 
+/// The same eight characters, grouped 4-4, that `kith approve` and the TUI
+/// print. A Person compares this string against another Device's out of band,
+/// so every surface has to render it identically.
 fn short_device(device: &str) -> String {
-    device.chars().take(7).collect()
+    crate::cmd::membership::fingerprint(device)
 }
 
 /// `~/kith/walls` rather than `/home/ana/kith/walls`.
@@ -2081,7 +2084,7 @@ mod tests {
         assert_eq!(me.role, Role::Admin);
         assert!(me.steward, "the mark comes off disk, not off the transport");
         assert_eq!(me.presence, "unknown");
-        assert_eq!(me.device, "P56IOI7");
+        assert_eq!(me.device, "P56I-OI7M");
 
         let them = members.iter().find(|m| !m.you).expect("Ben is a row");
         assert_eq!(them.role, Role::Member);
@@ -2103,7 +2106,7 @@ mod tests {
         let (members, unclaimed) = member_rows(&l, Some(&peers), &BTreeMap::new(), Some(ANA_DEVICE));
         assert_eq!(members.len(), 1);
         assert_eq!(unclaimed.len(), 1);
-        assert_eq!(unclaimed[0].device, "K5J2FVL");
+        assert_eq!(unclaimed[0].device, "K5J2-FVLB");
         assert_eq!(unclaimed[0].name, "ben-thinkpad");
         assert_eq!(unclaimed[0].presence, CONNECTED);
 
@@ -2460,8 +2463,8 @@ mod tests {
     }
 
     #[test]
-    fn a_short_device_id_is_seven_characters_and_never_a_person() {
-        assert_eq!(short_device(ANA_DEVICE), "P56IOI7");
+    fn a_device_reads_the_same_here_as_in_approve_and_the_tui() {
+        assert_eq!(short_device(ANA_DEVICE), "P56I-OI7M");
         assert_eq!(short_device("AB"), "AB");
     }
 

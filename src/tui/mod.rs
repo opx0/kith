@@ -2030,7 +2030,13 @@ impl State {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, text);
+        // Staged and renamed: a crash mid-write would otherwise truncate the
+        // file, and `load` treats an unreadable one as Default — silently
+        // forgetting every Item this Person had seen.
+        let tmp = path.with_extension("toml.kith-tmp");
+        if std::fs::write(&tmp, text).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 }
 
